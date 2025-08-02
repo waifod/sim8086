@@ -166,14 +166,38 @@ impl fmt::Display for MemoryAddress {
         // Use the Debug implementation for a simple string representation
         match self {
             MemoryAddress::R(reg) => write!(f, "[{:?}]", reg),
-            MemoryAddress::RO8(reg, offset) => write!(f, "[{:?} + {:?}]", reg, offset),
-            MemoryAddress::RO16(reg, offset) => write!(f, "[{:?} + {:?}]", reg, offset),
+            MemoryAddress::RO8(reg, offset) => {
+                let disp = *offset as i8;
+                if disp >= 0 {
+                    write!(f, "[{:?} + {:?}]", reg, disp)
+                } else {
+                    write!(f, "[{:?} - {:?}]", reg, -disp)
+                }
+            }
+            MemoryAddress::RO16(reg, offset) => {
+                let disp = *offset as i16;
+                if disp >= 0 {
+                    write!(f, "[{:?} + {:?}]", reg, disp)
+                } else {
+                    write!(f, "[{:?} - {:?}]", reg, -disp)
+                }
+            }
             MemoryAddress::RR(reg1, reg2) => write!(f, "[{:?} + {:?}]", reg1, reg2),
             MemoryAddress::RRO8(reg1, reg2, offset) => {
-                write!(f, "[{:?} + {:?} + {:?}]", reg1, reg2, *offset as i8)
+                let disp = *offset as i8;
+                if disp >= 0 {
+                    write!(f, "[{:?} + {:?} + {:?}]", reg1, reg2, disp)
+                } else {
+                    write!(f, "[{:?} + {:?} - {:?}]", reg1, reg2, -disp)
+                }
             }
             MemoryAddress::RRO16(reg1, reg2, offset) => {
-                write!(f, "[{:?} + {:?} + {:?}]", reg1, reg2, *offset as i16)
+                let disp = *offset as i16;
+                if disp >= 0 {
+                    write!(f, "[{:?} + {:?} + {:?}]", reg1, reg2, disp)
+                } else {
+                    write!(f, "[{:?} + {:?} - {:?}]", reg1, reg2, -disp)
+                }
             }
             MemoryAddress::DA(addr) => write!(f, "[{}]", addr),
         }
@@ -197,8 +221,8 @@ impl fmt::Display for Operand {
             Operand::R8(reg) => write!(f, "{}", reg),
             Operand::R16(reg) => write!(f, "{}", reg),
             Operand::MA(addr) => write!(f, "{}", addr),
-            Operand::I8(val) => write!(f, "byte {}", *val as i8),
-            Operand::I16(val) => write!(f, "word {}", *val as i16),
+            Operand::I8(val) => write!(f, "byte {}", val),
+            Operand::I16(val) => write!(f, "word {}", val),
         }
     }
 }
@@ -318,7 +342,7 @@ pub fn decode_mov_instruction(
     )) // Return instruction and its length
 }
 
-fn decode_mov_immediate_instruction(
+fn decode_mov_immediate_to_register_instruction(
     w_bit: u8,
     reg: u8,
     bytes: &[u8],
@@ -343,6 +367,94 @@ fn decode_mov_immediate_instruction(
             source: op2,
         },
         (w_bit + 1) as usize,
+    ))
+}
+
+fn decode_mov_memory_accumulator_instruction(
+    d_bit: u8,
+    w_bit: u8,
+    bytes: &[u8],
+) -> io::Result<(Instruction, usize)> {
+    if bytes.len() < 2 {
+        panic!("Not enough bytes")
+    }
+    let op1 = if w_bit == 0 {
+        Operand::R8(Register8::AL)
+    } else {
+        Operand::R16(Register16::AX)
+    };
+    let op2 = Operand::MA(MemoryAddress::DA(bytes[0] as u16 + 256 * (bytes[1] as u16)));
+
+    Ok((
+        if d_bit == 0 {
+            Instruction::Mov {
+                destination: op1,
+                source: op2,
+            }
+        } else {
+            Instruction::Mov {
+                destination: op2,
+                source: op1,
+            }
+        },
+        2,
+    ))
+}
+
+fn decode_mov_immediate_to_register_memory_instruction(
+    w_bit: u8,
+    bytes: &[u8],
+) -> io::Result<(Instruction, usize)> {
+    let mod_rm_byte = bytes[0];
+    let md = (mod_rm_byte >> 6) & 0b11;
+    let rm = mod_rm_byte & 0b111;
+
+    let (destination, dest_offset) = match md {
+        0b11 => {
+            let reg = if w_bit == 0 {
+                Operand::R8(Register8::from_encoding(rm))
+            } else {
+                Operand::R16(Register16::from_encoding(rm))
+            };
+            (reg, 0)
+        }
+        _ => {
+            let mem = Operand::MA(MemoryAddress::from_encoding(md, rm, &bytes[1..]));
+            let offset = match md {
+                0b00 => {
+                    if rm == 0b110 {
+                        2
+                    } else {
+                        0
+                    }
+                }
+                0b01 => 1,
+                0b10 => 2,
+                _ => 0,
+            };
+            (mem, offset)
+        }
+    };
+
+    let immediate_bytes_start = 1 + dest_offset;
+    let (source, immediate_size) = if w_bit == 0 {
+        (Operand::I8(bytes[immediate_bytes_start]), 1)
+    } else {
+        (
+            Operand::I16(
+                (bytes[immediate_bytes_start] as u16)
+                    + 256 * (bytes[immediate_bytes_start + 1] as u16),
+            ),
+            2,
+        )
+    };
+
+    Ok((
+        Instruction::Mov {
+            destination,
+            source,
+        },
+        1 + dest_offset + immediate_size,
     ))
 }
 
@@ -388,7 +500,14 @@ pub fn decode_instruction(bytes: &[u8]) -> io::Result<(Instruction, usize)> {
     } else if (opcode & 0b11110000) == 0b10110000 {
         let w_bit = (opcode >> 3) & 0b1;
         let reg = opcode & 0b111;
-        decode_mov_immediate_instruction(w_bit, reg, &bytes[1..])?
+        decode_mov_immediate_to_register_instruction(w_bit, reg, &bytes[1..])?
+    } else if (opcode & 0b11111110) == 0b11000110 {
+        let w_bit = opcode & 0b1;
+        decode_mov_immediate_to_register_memory_instruction(w_bit, &bytes[1..])?
+    } else if (opcode & 0b10100000) == 0b10100000 {
+        let d_bit = (opcode >> 1) & 0b1; // Extract D bit (bit 1)
+        let w_bit = opcode & 0b1; // Extract W bit (bit 0)
+        decode_mov_memory_accumulator_instruction(d_bit, w_bit, &bytes[1..])?
     } else {
         // Panic as requested for unsupported scenarios
         // TODO: add support for "Immediate to register/memory"
