@@ -196,6 +196,103 @@ impl fmt::Display for Operand {
     }
 }
 
+/// Represents a jump condition.
+#[derive(Debug, PartialEq, Eq)]
+pub enum JumpCondition {
+    JO,
+    JNO,
+    JB,
+    JNB,
+    JZ,
+    JNZ,
+    JBE,
+    JA,
+    JS,
+    JNS,
+    JP,
+    JNP,
+    JL,
+    JGE,
+    JLE,
+    JG,
+}
+
+impl JumpCondition {
+    /// Creates a JumpCondition from the 4-bit encoding in the opcode.
+    fn from_encoding(encoding: u8) -> Self {
+        match encoding {
+            0b0000 => Self::JO,
+            0b0001 => Self::JNO,
+            0b0010 => Self::JB,
+            0b0011 => Self::JNB,
+            0b0100 => Self::JZ,
+            0b0101 => Self::JNZ,
+            0b0110 => Self::JBE,
+            0b0111 => Self::JA,
+            0b1000 => Self::JS,
+            0b1001 => Self::JNS,
+            0b1010 => Self::JP,
+            0b1011 => Self::JNP,
+            0b1100 => Self::JL,
+            0b1101 => Self::JGE,
+            0b1110 => Self::JLE,
+            0b1111 => Self::JG,
+            _ => panic!("Invalid 4-bit encoding for JumpCondition: {}", encoding),
+        }
+    }
+}
+
+impl fmt::Display for JumpCondition {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::JO => "jo",
+                Self::JNO => "jno",
+                Self::JB => "jb",
+                Self::JNB => "jnb",
+                Self::JZ => "jz",
+                Self::JNZ => "jnz",
+                Self::JBE => "jbe",
+                Self::JA => "ja",
+                Self::JS => "js",
+                Self::JNS => "jns",
+                Self::JP => "jp",
+                Self::JNP => "jnp",
+                Self::JL => "jl",
+                Self::JGE => "jge",
+                Self::JLE => "jle",
+                Self::JG => "jg",
+            }
+        )
+    }
+}
+
+/// Represents the type of a LOOP or JCXZ instruction.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoopType {
+    LOOPNZ,
+    LOOPZ,
+    LOOP,
+    JCXZ,
+}
+
+impl fmt::Display for LoopType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::LOOPNZ => "loopnz",
+                Self::LOOPZ => "loopz",
+                Self::LOOP => "loop",
+                Self::JCXZ => "jcxz",
+            }
+        )
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum BinaryOp {
     MOV,
@@ -210,7 +307,7 @@ impl BinaryOp {
             0b000 => BinaryOp::ADD,
             0b101 => BinaryOp::SUB,
             0b111 => BinaryOp::CMP,
-            _ => panic!("Unsupported arithmetic operation encoding: {}", op),
+            _ => unreachable!(),
         }
     }
 }
@@ -234,12 +331,23 @@ impl fmt::Display for BinaryOp {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Instruction {
     BO(BinaryOp, Operand, Operand),
+    JMP(JumpCondition, i8),
+    LOOP(LoopType, i8),
 }
 
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::BO(op, dest, src) => write!(f, "{} {}, {}", op, dest, src),
+            Self::JMP(cond, disp) => {
+                let target_offset = *disp as i16 + 2;
+                write!(f, "{} short ${:+}", cond, target_offset)
+            }
+            Self::LOOP(loop_type, disp) => {
+                let target_offset = *disp as i16 + 2;
+                // The only change is removing "short" from this line
+                write!(f, "{} ${:+}", loop_type, target_offset)
+            }
         }
     }
 }
@@ -253,7 +361,7 @@ struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
-    /// Creates a new Decoder for the given byte slice.
+    /// Creates a Decoder for the given byte slice.
     fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, pos: 0 }
     }
@@ -298,6 +406,10 @@ impl<'a> Decoder<'a> {
             0xB0..=0xBF => self.decode_mov_imm_to_reg(opcode),
             // MOV: Immediate to register/memory
             0xC6 | 0xC7 => self.decode_mov_imm_to_rm(opcode),
+            // Conditional Jumps
+            0x70..=0x7F => self.decode_jump(opcode),
+            // LOOP and JCXZ instructions
+            0xE0..=0xE3 => self.decode_loop(opcode),
             _ => panic!("Unsupported opcode: {:#04x}", opcode),
         };
         println!("{}", instr); // Uncomment for debugging
@@ -305,6 +417,26 @@ impl<'a> Decoder<'a> {
     }
 
     // --- Instruction Format Decoders ---
+
+    /// Decodes a LOOP, LOOPZ, LOOPNZ, or JCXZ instruction.
+    fn decode_loop(&mut self, opcode: u8) -> Instruction {
+        let loop_type = match opcode {
+            0xE0 => LoopType::LOOPNZ,
+            0xE1 => LoopType::LOOPZ,
+            0xE2 => LoopType::LOOP,
+            0xE3 => LoopType::JCXZ,
+            _ => unreachable!(), // Guarded by the call site match statement
+        };
+        let disp = self.read_u8() as i8;
+        Instruction::LOOP(loop_type, disp)
+    }
+
+    /// Decodes a conditional jump instruction.
+    fn decode_jump(&mut self, opcode: u8) -> Instruction {
+        let cond = JumpCondition::from_encoding(opcode & 0x0F);
+        let disp = self.read_u8() as i8;
+        Instruction::JMP(cond, disp)
+    }
 
     fn decode_arithmetic_reg_mem(&mut self, opcode: u8) -> Instruction {
         let op = BinaryOp::arithmetic_op_from_encoding((opcode >> 3) & 0b111);
