@@ -1,8 +1,10 @@
+use num_enum::TryFromPrimitive;
 use std::env;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
+use strum_macros::Display;
 
 // --- Main public API ---
 
@@ -25,99 +27,48 @@ pub fn decode(bytes: &[u8]) -> Vec<Instruction> {
 // --- Instruction and Operand Enums ---
 
 /// Represents the 16-bit general-purpose registers of the 8086.
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+// Derived traits automatically handle Display and conversion from u8.
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Display, TryFromPrimitive)]
+#[repr(u8)]
 pub enum Register16 {
-    AX,
-    CX,
-    DX,
-    BX,
-    SP,
-    BP,
-    SI,
-    DI,
-}
-
-impl Register16 {
-    fn from_encoding(encoding: u8) -> Self {
-        match encoding {
-            0b000 => Self::AX,
-            0b001 => Self::CX,
-            0b010 => Self::DX,
-            0b011 => Self::BX,
-            0b100 => Self::SP,
-            0b101 => Self::BP,
-            0b110 => Self::SI,
-            0b111 => Self::DI,
-            _ => panic!("Invalid 3-bit encoding for 16-bit register: {}", encoding),
-        }
-    }
-}
-
-impl fmt::Display for Register16 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::AX => "ax",
-                Self::CX => "cx",
-                Self::DX => "dx",
-                Self::BX => "bx",
-                Self::SP => "sp",
-                Self::BP => "bp",
-                Self::SI => "si",
-                Self::DI => "di",
-            }
-        )
-    }
+    #[strum(serialize = "ax")]
+    AX = 0b000,
+    #[strum(serialize = "cx")]
+    CX = 0b001,
+    #[strum(serialize = "dx")]
+    DX = 0b010,
+    #[strum(serialize = "bx")]
+    BX = 0b011,
+    #[strum(serialize = "sp")]
+    SP = 0b100,
+    #[strum(serialize = "bp")]
+    BP = 0b101,
+    #[strum(serialize = "si")]
+    SI = 0b110,
+    #[strum(serialize = "di")]
+    DI = 0b111,
 }
 
 /// Represents the 8-bit general-purpose registers of the 8086.
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Display, TryFromPrimitive)]
+#[repr(u8)]
 pub enum Register8 {
-    AL,
-    CL,
-    DL,
-    BL,
-    AH,
-    CH,
-    DH,
-    BH,
-}
-
-impl Register8 {
-    fn from_encoding(encoding: u8) -> Self {
-        match encoding {
-            0b000 => Self::AL,
-            0b001 => Self::CL,
-            0b010 => Self::DL,
-            0b011 => Self::BL,
-            0b100 => Self::AH,
-            0b101 => Self::CH,
-            0b110 => Self::DH,
-            0b111 => Self::BH,
-            _ => panic!("Invalid 3-bit encoding for 8-bit register: {}", encoding),
-        }
-    }
-}
-
-impl fmt::Display for Register8 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::AL => "al",
-                Self::CL => "cl",
-                Self::DL => "dl",
-                Self::BL => "bl",
-                Self::AH => "ah",
-                Self::CH => "ch",
-                Self::DH => "dh",
-                Self::BH => "bh",
-            }
-        )
-    }
+    #[strum(serialize = "al")]
+    AL = 0b000,
+    #[strum(serialize = "cl")]
+    CL = 0b001,
+    #[strum(serialize = "dl")]
+    DL = 0b010,
+    #[strum(serialize = "bl")]
+    BL = 0b011,
+    #[strum(serialize = "ah")]
+    AH = 0b100,
+    #[strum(serialize = "ch")]
+    CH = 0b101,
+    #[strum(serialize = "dh")]
+    DH = 0b110,
+    #[strum(serialize = "bh")]
+    BH = 0b111,
 }
 
 /// Represents a memory address calculation.
@@ -197,111 +148,72 @@ impl fmt::Display for Operand {
 }
 
 /// Represents a jump condition.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Display, TryFromPrimitive)]
+#[repr(u8)]
 pub enum JumpCondition {
-    JO,
-    JNO,
-    JB,
-    JNB,
-    JZ,
-    JNZ,
-    JBE,
-    JA,
-    JS,
-    JNS,
-    JP,
-    JNP,
-    JL,
-    JGE,
-    JLE,
-    JG,
-}
-
-impl JumpCondition {
-    /// Creates a JumpCondition from the 4-bit encoding in the opcode.
-    fn from_encoding(encoding: u8) -> Self {
-        match encoding {
-            0b0000 => Self::JO,
-            0b0001 => Self::JNO,
-            0b0010 => Self::JB,
-            0b0011 => Self::JNB,
-            0b0100 => Self::JZ,
-            0b0101 => Self::JNZ,
-            0b0110 => Self::JBE,
-            0b0111 => Self::JA,
-            0b1000 => Self::JS,
-            0b1001 => Self::JNS,
-            0b1010 => Self::JP,
-            0b1011 => Self::JNP,
-            0b1100 => Self::JL,
-            0b1101 => Self::JGE,
-            0b1110 => Self::JLE,
-            0b1111 => Self::JG,
-            _ => panic!("Invalid 4-bit encoding for JumpCondition: {}", encoding),
-        }
-    }
-}
-
-impl fmt::Display for JumpCondition {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::JO => "jo",
-                Self::JNO => "jno",
-                Self::JB => "jb",
-                Self::JNB => "jnb",
-                Self::JZ => "jz",
-                Self::JNZ => "jnz",
-                Self::JBE => "jbe",
-                Self::JA => "ja",
-                Self::JS => "js",
-                Self::JNS => "jns",
-                Self::JP => "jp",
-                Self::JNP => "jnp",
-                Self::JL => "jl",
-                Self::JGE => "jge",
-                Self::JLE => "jle",
-                Self::JG => "jg",
-            }
-        )
-    }
+    #[strum(serialize = "jo")]
+    JO = 0x0,
+    #[strum(serialize = "jno")]
+    JNO = 0x1,
+    #[strum(serialize = "jb")]
+    JB = 0x2,
+    #[strum(serialize = "jnb")]
+    JNB = 0x3,
+    #[strum(serialize = "jz")]
+    JZ = 0x4,
+    #[strum(serialize = "jnz")]
+    JNZ = 0x5,
+    #[strum(serialize = "jbe")]
+    JBE = 0x6,
+    #[strum(serialize = "ja")]
+    JA = 0x7,
+    #[strum(serialize = "js")]
+    JS = 0x8,
+    #[strum(serialize = "jns")]
+    JNS = 0x9,
+    #[strum(serialize = "jp")]
+    JP = 0xA,
+    #[strum(serialize = "jnp")]
+    JNP = 0xB,
+    #[strum(serialize = "jl")]
+    JL = 0xC,
+    #[strum(serialize = "jge")]
+    JGE = 0xD,
+    #[strum(serialize = "jle")]
+    JLE = 0xE,
+    #[strum(serialize = "jg")]
+    JG = 0xF,
 }
 
 /// Represents the type of a LOOP or JCXZ instruction.
-#[derive(Debug, PartialEq, Eq)]
-pub enum LoopType {
-    LOOPNZ,
-    LOOPZ,
-    LOOP,
-    JCXZ,
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Display, TryFromPrimitive)]
+#[repr(u8)]
+pub enum LoopCondition {
+    #[strum(serialize = "loopnz")]
+    LOOPNZ = 0xE0,
+    #[strum(serialize = "loopz")]
+    LOOPZ = 0xE1,
+    #[strum(serialize = "loop")]
+    LOOP = 0xE2,
+    #[strum(serialize = "jcxz")]
+    JCXZ = 0xE3,
 }
 
-impl fmt::Display for LoopType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::LOOPNZ => "loopnz",
-                Self::LOOPZ => "loopz",
-                Self::LOOP => "loop",
-                Self::JCXZ => "jcxz",
-            }
-        )
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
+/// Represents a binary arithmetic or move operation.
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Display)]
 pub enum BinaryOp {
+    #[strum(serialize = "mov")]
     MOV,
+    #[strum(serialize = "add")]
     ADD,
+    #[strum(serialize = "sub")]
     SUB,
+    #[strum(serialize = "cmp")]
     CMP,
 }
 
 impl BinaryOp {
+    // This function is kept because only some variants map to an encoding.
     fn arithmetic_op_from_encoding(op: u8) -> Self {
         match op {
             0b000 => BinaryOp::ADD,
@@ -312,27 +224,12 @@ impl BinaryOp {
     }
 }
 
-impl fmt::Display for BinaryOp {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::MOV => "mov",
-                Self::ADD => "add",
-                Self::SUB => "sub",
-                Self::CMP => "cmp",
-            }
-        )
-    }
-}
-
 /// Represents a decoded 8086 instruction.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Instruction {
     BO(BinaryOp, Operand, Operand),
     JMP(JumpCondition, i8),
-    LOOP(LoopType, i8),
+    LOOP(LoopCondition, i8),
 }
 
 impl fmt::Display for Instruction {
@@ -343,10 +240,9 @@ impl fmt::Display for Instruction {
                 let target_offset = *disp as i16 + 2;
                 write!(f, "{} short ${:+}", cond, target_offset)
             }
-            Self::LOOP(loop_type, disp) => {
+            Self::LOOP(cond, disp) => {
                 let target_offset = *disp as i16 + 2;
-                // The only change is removing "short" from this line
-                write!(f, "{} ${:+}", loop_type, target_offset)
+                write!(f, "{} ${:+}", cond, target_offset)
             }
         }
     }
@@ -361,7 +257,7 @@ struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
-    /// Creates a Decoder for the given byte slice.
+    /// Creates a new Decoder for the given byte slice.
     fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, pos: 0 }
     }
@@ -390,6 +286,7 @@ impl<'a> Decoder<'a> {
 
     /// Main instruction decoding loop.
     fn decode_next_instruction(&mut self) -> Instruction {
+        let start_pos = self.pos;
         let opcode = self.read_u8();
         let instr = match opcode {
             // Arithmetic: Register/memory with register
@@ -412,7 +309,21 @@ impl<'a> Decoder<'a> {
             0xE0..=0xE3 => self.decode_loop(opcode),
             _ => panic!("Unsupported opcode: {:#04x}", opcode),
         };
-        println!("{}", instr); // Uncomment for debugging
+
+        // --- Printing for debugging purposes ---
+        println!(
+            "Starting position: {}\nProcessed: {} bytes\nBytes: {}\n{}\n",
+            start_pos,
+            self.pos - start_pos,
+            self.bytes[start_pos..self.pos]
+                .iter()
+                .map(|n| format!("{:08b}", n))
+                .collect::<Vec<_>>()
+                .join(", "),
+            instr
+        );
+        // ---------------------------------------
+
         instr
     }
 
@@ -420,20 +331,14 @@ impl<'a> Decoder<'a> {
 
     /// Decodes a LOOP, LOOPZ, LOOPNZ, or JCXZ instruction.
     fn decode_loop(&mut self, opcode: u8) -> Instruction {
-        let loop_type = match opcode {
-            0xE0 => LoopType::LOOPNZ,
-            0xE1 => LoopType::LOOPZ,
-            0xE2 => LoopType::LOOP,
-            0xE3 => LoopType::JCXZ,
-            _ => unreachable!(), // Guarded by the call site match statement
-        };
+        let cond = LoopCondition::try_from(opcode).expect("Invalid loop condition encoding");
         let disp = self.read_u8() as i8;
-        Instruction::LOOP(loop_type, disp)
+        Instruction::LOOP(cond, disp)
     }
 
     /// Decodes a conditional jump instruction.
     fn decode_jump(&mut self, opcode: u8) -> Instruction {
-        let cond = JumpCondition::from_encoding(opcode & 0x0F);
+        let cond = JumpCondition::try_from(opcode & 0x0F).expect("Invalid jump condition encoding");
         let disp = self.read_u8() as i8;
         Instruction::JMP(cond, disp)
     }
@@ -444,9 +349,13 @@ impl<'a> Decoder<'a> {
         let w = (opcode & 0b1) != 0;
         let mod_rm_byte = self.read_u8();
         let reg_op = if w {
-            Operand::R16(Register16::from_encoding((mod_rm_byte >> 3) & 0b111))
+            let reg_encoding = (mod_rm_byte >> 3) & 0b111;
+            let reg = Register16::try_from(reg_encoding).expect("Invalid 16-bit reg encoding");
+            Operand::R16(reg)
         } else {
-            Operand::R8(Register8::from_encoding((mod_rm_byte >> 3) & 0b111))
+            let reg_encoding = (mod_rm_byte >> 3) & 0b111;
+            let reg = Register8::try_from(reg_encoding).expect("Invalid 8-bit reg encoding");
+            Operand::R8(reg)
         };
         let rm_op = self.decode_rm_operand(mod_rm_byte, w);
         let (dest, src) = if d { (reg_op, rm_op) } else { (rm_op, reg_op) };
@@ -490,11 +399,14 @@ impl<'a> Decoder<'a> {
         let d = (opcode & 0b10) != 0;
         let w = (opcode & 0b1) != 0;
         let mod_rm_byte = self.read_u8();
-        let reg_code = (mod_rm_byte >> 3) & 0b111;
         let reg_op = if w {
-            Operand::R16(Register16::from_encoding(reg_code))
+            let reg_encoding = (mod_rm_byte >> 3) & 0b111;
+            let reg = Register16::try_from(reg_encoding).expect("Invalid 16-bit reg encoding");
+            Operand::R16(reg)
         } else {
-            Operand::R8(Register8::from_encoding(reg_code))
+            let reg_encoding = (mod_rm_byte >> 3) & 0b111;
+            let reg = Register8::try_from(reg_encoding).expect("Invalid 8-bit reg encoding");
+            Operand::R8(reg)
         };
         let rm_op = self.decode_rm_operand(mod_rm_byte, w);
         let (dest, src) = if d { (reg_op, rm_op) } else { (rm_op, reg_op) };
@@ -503,11 +415,12 @@ impl<'a> Decoder<'a> {
 
     fn decode_mov_imm_to_reg(&mut self, opcode: u8) -> Instruction {
         let w = (opcode & 0b1000) != 0;
-        let reg_code = opcode & 0b111;
         let dest = if w {
-            Operand::R16(Register16::from_encoding(reg_code))
+            let reg = Register16::try_from(opcode & 0b111).expect("Invalid 16-bit reg encoding");
+            Operand::R16(reg)
         } else {
-            Operand::R8(Register8::from_encoding(reg_code))
+            let reg = Register8::try_from(opcode & 0b111).expect("Invalid 8-bit reg encoding");
+            Operand::R8(reg)
         };
         let src = if w {
             Operand::I16(self.read_u16_le())
@@ -552,9 +465,11 @@ impl<'a> Decoder<'a> {
         let rm = mod_rm_byte & 0b111;
         if md == 0b11 {
             return if w {
-                Operand::R16(Register16::from_encoding(rm))
+                let reg = Register16::try_from(rm).expect("Invalid 16-bit reg encoding");
+                Operand::R16(reg)
             } else {
-                Operand::R8(Register8::from_encoding(rm))
+                let reg = Register8::try_from(rm).expect("Invalid 8-bit reg encoding");
+                Operand::R8(reg)
             };
         }
         let addr = match md {
@@ -646,7 +561,7 @@ fn main() {
     let input_file = &args[1];
     let output_file = &args[2];
 
-    println!("Starting 8086 decoder...");
+    println!("Starting 8086 decoder...\n");
     match read_file(input_file) {
         Ok(buffer) => {
             let decoded_instructions = decode(&buffer);

@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# For deriving the Display trait to convert enums to strings
+strum = "^0.27"
+strum_macros = "^0.27"
+
+# For deriving the TryFrom trait to convert numbers to enums
+num_enum = "^0.7"
