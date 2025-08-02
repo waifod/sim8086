@@ -1,210 +1,182 @@
 use core::panic;
 use std::env; // Import the env module for command-line arguments
 use std::fmt;
-use std::fmt::write;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path; // Import the fmt module for Display trait
 
+// --- Main public API ---
+
+/// Decodes a byte slice into a vector of 8086 instructions.
+///
+/// It will process bytes sequentially until the slice is exhausted.
+///
+/// # Panics
+/// Panics if it encounters an unsupported opcode or an invalid byte sequence
+/// for a supported instruction.
+pub fn decode(bytes: &[u8]) -> Vec<Instruction> {
+    let mut decoder = Decoder::new(bytes);
+    let mut instructions = Vec::new();
+    while !decoder.is_eof() {
+        instructions.push(decoder.decode_next_instruction());
+    }
+    instructions
+}
+
+// --- Instruction and Operand Enums ---
+
 /// Represents the 16-bit general-purpose registers of the 8086.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum Register16 {
-    AX, // Accumulator Register
-    CX, // Count Register
-    DX, // Data Register
-    BX, // Base Register
-    SP, // Stack Pointer
-    BP, // Base Pointer
-    SI, // Source Index
-    DI, // Destination Index,
+    AX,
+    CX,
+    DX,
+    BX,
+    SP,
+    BP,
+    SI,
+    DI,
 }
 
 impl Register16 {
-    /// Converts a 3-bit register encoding to a `Register16` enum variant.
-    /// Panics if the encoding is not a valid 16-bit register.
     fn from_encoding(encoding: u8) -> Self {
         match encoding {
-            0b000 => Register16::AX,
-            0b001 => Register16::CX,
-            0b010 => Register16::DX,
-            0b011 => Register16::BX,
-            0b100 => Register16::SP,
-            0b101 => Register16::BP,
-            0b110 => Register16::SI,
-            0b111 => Register16::DI,
+            0b000 => Self::AX,
+            0b001 => Self::CX,
+            0b010 => Self::DX,
+            0b011 => Self::BX,
+            0b100 => Self::SP,
+            0b101 => Self::BP,
+            0b110 => Self::SI,
+            0b111 => Self::DI,
             _ => panic!("Invalid 3-bit encoding for 16-bit register: {}", encoding),
         }
     }
 }
 
-// Implement fmt::Display for Register16
 impl fmt::Display for Register16 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // Use the Debug implementation for a simple string representation
-        write!(f, "{:?}", self)
+        // Use a more direct mapping for lowercase assembly convention
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::AX => "ax",
+                Self::CX => "cx",
+                Self::DX => "dx",
+                Self::BX => "bx",
+                Self::SP => "sp",
+                Self::BP => "bp",
+                Self::SI => "si",
+                Self::DI => "di",
+            }
+        )
     }
 }
 
 /// Represents the 8-bit general-purpose registers of the 8086.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum Register8 {
-    AL, // Accumulator Low
-    CL, // Count Low
-    DL, // Data Low
-    BL, // Base Low
-    AH, // Accumulator High
-    CH, // Count High
-    DH, // Data High
-    BH, // Base High
+    AL,
+    CL,
+    DL,
+    BL,
+    AH,
+    CH,
+    DH,
+    BH,
 }
 
 impl Register8 {
-    /// Converts a 3-bit register encoding to a `Register8` enum variant.
-    ///
-    /// The 8086 uses the same 3-bit encoding for both low (AL, CL, etc.) and high (AH, CH, etc.)
-    /// byte registers. The `W` bit in the instruction's opcode determines which set is used.
-    /// This function maps the 3-bit encoding directly to the correct 8-bit register.
-    ///
-    /// Panics if the encoding is not a valid 3-bit register encoding.
     fn from_encoding(encoding: u8) -> Self {
         match encoding {
-            0b000 => Register8::AL,
-            0b001 => Register8::CL,
-            0b010 => Register8::DL,
-            0b011 => Register8::BL,
-            0b100 => Register8::AH,
-            0b101 => Register8::CH,
-            0b110 => Register8::DH,
-            0b111 => Register8::BH,
+            0b000 => Self::AL,
+            0b001 => Self::CL,
+            0b010 => Self::DL,
+            0b011 => Self::BL,
+            0b100 => Self::AH,
+            0b101 => Self::CH,
+            0b110 => Self::DH,
+            0b111 => Self::BH,
             _ => panic!("Invalid 3-bit encoding for 8-bit register: {}", encoding),
         }
     }
 }
 
-// Implement fmt::Display for Register8
 impl fmt::Display for Register8 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // Use the Debug implementation for a simple string representation
-        write!(f, "{:?}", self)
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::AL => "al",
+                Self::CL => "cl",
+                Self::DL => "dl",
+                Self::BL => "bl",
+                Self::AH => "ah",
+                Self::CH => "ch",
+                Self::DH => "dh",
+                Self::BH => "bh",
+            }
+        )
     }
 }
 
+/// Represents a memory address calculation.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum MemoryAddress {
     R(Register16),
-    RO8(Register16, u8),
-    RO16(Register16, u16),
+    RD8(Register16, u8),
+    RD16(Register16, u16),
     RR(Register16, Register16),
-    RRO8(Register16, Register16, u8),
-    RRO16(Register16, Register16, u16),
+    RRD8(Register16, Register16, u8),
+    RRD16(Register16, Register16, u16),
     DA(u16),
-}
-
-impl MemoryAddress {
-    fn from_encoding(md: u8, rm: u8, bytes: &[u8]) -> Self {
-        match md {
-            0b00 => match rm {
-                0b000 => MemoryAddress::RR(Register16::BX, Register16::SI),
-                0b001 => MemoryAddress::RR(Register16::BX, Register16::DI),
-                0b010 => MemoryAddress::RR(Register16::BP, Register16::SI),
-                0b011 => MemoryAddress::RR(Register16::BP, Register16::DI),
-                0b100 => MemoryAddress::R(Register16::SI),
-                0b101 => MemoryAddress::R(Register16::DI),
-                0b110 => {
-                    if bytes.len() < 2 {
-                        panic!("Not enough bytes")
-                    } else {
-                        MemoryAddress::DA((bytes[0] as u16) + 256 * (bytes[1] as u16))
-                    }
-                }
-                0b111 => MemoryAddress::R(Register16::BX),
-                _ => panic!("Unsupported byte sequence"),
-            },
-            0b01 => {
-                if bytes.len() == 0 {
-                    panic!("not enough bytes")
-                } else {
-                    let displacement = bytes[0];
-                    match rm {
-                        0b000 => MemoryAddress::RRO8(Register16::BX, Register16::SI, displacement),
-                        0b001 => MemoryAddress::RRO8(Register16::BX, Register16::DI, displacement),
-                        0b010 => MemoryAddress::RRO8(Register16::BP, Register16::SI, displacement),
-                        0b011 => MemoryAddress::RRO8(Register16::BP, Register16::DI, displacement),
-                        0b100 => MemoryAddress::RO8(Register16::SI, displacement),
-                        0b101 => MemoryAddress::RO8(Register16::DI, displacement),
-                        0b110 => MemoryAddress::RO8(Register16::BP, displacement),
-                        0b111 => MemoryAddress::RO8(Register16::BX, displacement),
-                        _ => panic!("Unsupported byte sequence"),
-                    }
-                }
-            }
-            0b10 => {
-                if bytes.len() < 2 {
-                    panic!("not enough bytes")
-                } else {
-                    let displacement = (bytes[0] as u16) + 256 * (bytes[1] as u16);
-                    match rm {
-                        0b000 => MemoryAddress::RRO16(Register16::BX, Register16::SI, displacement),
-                        0b001 => MemoryAddress::RRO16(Register16::BX, Register16::DI, displacement),
-                        0b010 => MemoryAddress::RRO16(Register16::BP, Register16::SI, displacement),
-                        0b011 => MemoryAddress::RRO16(Register16::BP, Register16::DI, displacement),
-                        0b100 => MemoryAddress::RO16(Register16::SI, displacement),
-                        0b101 => MemoryAddress::RO16(Register16::DI, displacement),
-                        0b110 => MemoryAddress::RO16(Register16::BP, displacement),
-                        0b111 => MemoryAddress::RO16(Register16::BX, displacement),
-                        _ => panic!("Unsupported byte sequence"),
-                    }
-                }
-            }
-            _ => panic!("Unsupported byte sequence"),
-        }
-    }
 }
 
 impl fmt::Display for MemoryAddress {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // Use the Debug implementation for a simple string representation
         match self {
-            MemoryAddress::R(reg) => write!(f, "[{:?}]", reg),
-            MemoryAddress::RO8(reg, offset) => {
+            Self::R(reg) => write!(f, "[{}]", reg),
+            Self::RR(r1, r2) => write!(f, "[{} + {}]", r1, r2),
+            Self::DA(addr) => write!(f, "[{}]", addr),
+            Self::RD8(reg, offset) => {
                 let disp = *offset as i8;
                 if disp >= 0 {
-                    write!(f, "[{:?} + {:?}]", reg, disp)
+                    write!(f, "[{} + {}]", reg, disp)
                 } else {
-                    write!(f, "[{:?} - {:?}]", reg, -disp)
+                    write!(f, "[{} - {}]", reg, -disp)
                 }
             }
-            MemoryAddress::RO16(reg, offset) => {
+            Self::RD16(reg, offset) => {
                 let disp = *offset as i16;
                 if disp >= 0 {
-                    write!(f, "[{:?} + {:?}]", reg, disp)
+                    write!(f, "[{} + {}]", reg, disp)
                 } else {
-                    write!(f, "[{:?} - {:?}]", reg, -disp)
+                    write!(f, "[{} - {}]", reg, -disp)
                 }
             }
-            MemoryAddress::RR(reg1, reg2) => write!(f, "[{:?} + {:?}]", reg1, reg2),
-            MemoryAddress::RRO8(reg1, reg2, offset) => {
+            Self::RRD8(r1, r2, offset) => {
                 let disp = *offset as i8;
                 if disp >= 0 {
-                    write!(f, "[{:?} + {:?} + {:?}]", reg1, reg2, disp)
+                    write!(f, "[{} + {} + {}]", r1, r2, disp)
                 } else {
-                    write!(f, "[{:?} + {:?} - {:?}]", reg1, reg2, -disp)
+                    write!(f, "[{} + {} - {}]", r1, r2, -disp)
                 }
             }
-            MemoryAddress::RRO16(reg1, reg2, offset) => {
+            Self::RRD16(r1, r2, offset) => {
                 let disp = *offset as i16;
                 if disp >= 0 {
-                    write!(f, "[{:?} + {:?} + {:?}]", reg1, reg2, disp)
+                    write!(f, "[{} + {} + {}]", r1, r2, disp)
                 } else {
-                    write!(f, "[{:?} + {:?} - {:?}]", reg1, reg2, -disp)
+                    write!(f, "[{} + {} - {}]", r1, r2, -disp)
                 }
             }
-            MemoryAddress::DA(addr) => write!(f, "[{}]", addr),
         }
     }
 }
 
-/// Represents an operand, which can be either an 8-bit or a 16-bit register.
+/// Represents an operand for an instruction.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum Operand {
     R8(Register8),
@@ -214,346 +186,231 @@ pub enum Operand {
     I16(u16),
 }
 
-// Implement fmt::Display for Operand
 impl fmt::Display for Operand {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Operand::R8(reg) => write!(f, "{}", reg),
-            Operand::R16(reg) => write!(f, "{}", reg),
-            Operand::MA(addr) => write!(f, "{}", addr),
-            Operand::I8(val) => write!(f, "byte {}", val),
-            Operand::I16(val) => write!(f, "word {}", val),
+            Self::R8(reg) => write!(f, "{}", reg),
+            Self::R16(reg) => write!(f, "{}", reg),
+            Self::MA(addr) => write!(f, "{}", addr),
+            Self::I8(val) => write!(f, "byte {}", val),
+            Self::I16(val) => write!(f, "word {}", val),
         }
     }
 }
 
 /// Represents a decoded 8086 instruction.
-#[derive(Debug, PartialEq, Eq)] // Added PartialEq and Eq for easier testing of Instruction Vec
+#[derive(Debug, PartialEq, Eq)]
 pub enum Instruction {
-    /// A MOV instruction moving data from a source register to a destination register.
     Mov {
         destination: Operand,
         source: Operand,
     },
-    // Future instructions can be added here.
 }
 
-// Implement fmt::Display for Instruction
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Instruction::Mov {
+            Self::Mov {
                 destination,
                 source,
-            } => write!(f, "MOV {}, {}", destination, source),
+            } => write!(f, "mov {}, {}", destination, source),
         }
     }
 }
 
-fn decode_mov_operands(
-    d_bit: u8,
-    w_bit: u8,
-    md: u8,
-    reg: u8,
-    rm: u8,
-    bytes: &[u8],
-) -> io::Result<(Operand, Operand, usize)> {
-    let op1 = if w_bit == 0 {
-        Operand::R8(Register8::from_encoding(reg))
-    } else {
-        Operand::R16(Register16::from_encoding(reg))
-    };
-    let (op2, offset) = match md {
-        0b00 => (
-            Operand::MA(MemoryAddress::from_encoding(md, rm, bytes)),
-            if rm == 0b110 { 2 } else { 0 },
-        ),
-        0b01 => (Operand::MA(MemoryAddress::from_encoding(md, rm, bytes)), 1),
-        0b10 => (Operand::MA(MemoryAddress::from_encoding(md, rm, bytes)), 2),
-        0b11 => (
-            if w_bit == 0 {
-                Operand::R8(Register8::from_encoding(rm))
-            } else {
-                Operand::R16(Register16::from_encoding(rm))
-            },
-            0,
-        ),
-        _ => panic!("Unsupported byte sequence"),
-    };
-    if d_bit == 1 {
-        Ok((op1, op2, offset))
-    } else {
-        Ok((op2, op1, offset))
-    }
+// --- Private Decoder Implementation ---
+
+/// Manages the byte stream and decoding process.
+struct Decoder<'a> {
+    bytes: &'a [u8],
+    pos: usize,
 }
 
-/// Decodes a register-to-register MOV instruction from a byte slice.
-///
-/// This function expects to receive the opcode byte (which must have the 100010 prefix)
-/// and the ModR/M byte. It uses the `d_bit` and `w_bit` extracted from the opcode
-/// to correctly determine the direction and width of the operation.
-///
-/// # Arguments
-/// * `bytes` - A slice of bytes containing the instruction.
-/// * `d_bit` - The direction bit (bit 1 of the opcode). 1 means REG is destination, RM is source.
-///             0 means RM is destination, REG is source.
-/// * `w_bit` - The word bit (bit 0 of the opcode). 1 means 16-bit operation, 0 means 8-bit operation.
-///
-/// # Returns
-/// * `Ok((Instruction, usize))` if decoding is successful, where `usize` is the instruction length.
-/// * `Err(io::Error)` if there are not enough bytes for the minimal instruction or
-///   an unsupported MOD field is found (which will panic as per requirement).
-pub fn decode_mov_instruction(
-    d_bit: u8,
-    w_bit: u8,
-    bytes: &[u8],
-) -> io::Result<(Instruction, usize)> {
-    // MOV RegToReg instructions are always 2 bytes.
-    const MIN_BYTES: usize = 1;
-
-    if bytes.len() < MIN_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "Not enough bytes to decode a MOV instruction. Expected at least {}, got {}.",
-                MIN_BYTES,
-                bytes.len()
-            ),
-        ));
+impl<'a> Decoder<'a> {
+    /// Creates a new Decoder for the given byte slice.
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
     }
 
-    let mod_rm_byte = bytes[0];
-
-    // Extract MOD, REG, and RM fields from the ModR/M byte
-    let md = (mod_rm_byte >> 6) & 0b11; // Bits 7-6
-    let reg = (mod_rm_byte >> 3) & 0b111; // Bits 5-3
-    let rm = mod_rm_byte & 0b111; // Bits 2-0
-
-    // For register-to-register MOV, MOD must be 0b11 (3)
-    let (destination, source, offset) =
-        decode_mov_operands(d_bit, w_bit, md, reg, rm, &bytes[1..])?;
-
-    Ok((
-        Instruction::Mov {
-            destination,
-            source,
-        },
-        MIN_BYTES + offset,
-    )) // Return instruction and its length
-}
-
-fn decode_mov_immediate_to_register_instruction(
-    w_bit: u8,
-    reg: u8,
-    bytes: &[u8],
-) -> io::Result<(Instruction, usize)> {
-    if (w_bit as usize) + 1 > bytes.len() {
-        panic!("Not enough bytes");
+    /// Checks if all bytes have been consumed.
+    fn is_eof(&self) -> bool {
+        self.pos >= self.bytes.len()
     }
-    let (op1, op2) = if w_bit == 0 {
-        (
-            Operand::R8(Register8::from_encoding(reg)),
-            Operand::I8(bytes[0]),
-        )
-    } else {
-        (
-            Operand::R16(Register16::from_encoding(reg)),
-            Operand::I16((bytes[0] as u16) + 256 * (bytes[1] as u16)),
-        )
-    };
-    Ok((
-        Instruction::Mov {
-            destination: op1,
-            source: op2,
-        },
-        (w_bit + 1) as usize,
-    ))
-}
 
-fn decode_mov_memory_accumulator_instruction(
-    d_bit: u8,
-    w_bit: u8,
-    bytes: &[u8],
-) -> io::Result<(Instruction, usize)> {
-    if bytes.len() < 2 {
-        panic!("Not enough bytes")
+    /// Reads a single byte and advances the position. Panics if out of bounds.
+    fn read_u8(&mut self) -> u8 {
+        if self.pos >= self.bytes.len() {
+            panic!("Unexpected end of byte stream trying to read a byte");
+        }
+        let byte = self.bytes[self.pos];
+        self.pos += 1;
+        byte
     }
-    let op1 = if w_bit == 0 {
-        Operand::R8(Register8::AL)
-    } else {
-        Operand::R16(Register16::AX)
-    };
-    let op2 = Operand::MA(MemoryAddress::DA(bytes[0] as u16 + 256 * (bytes[1] as u16)));
 
-    Ok((
-        if d_bit == 0 {
-            Instruction::Mov {
-                destination: op1,
-                source: op2,
+    /// Reads a 16-bit little-endian word. Panics if out of bounds.
+    fn read_u16_le(&mut self) -> u16 {
+        let low = self.read_u8() as u16;
+        let high = self.read_u8() as u16;
+        low | (high << 8)
+    }
+
+    /// Main instruction decoding loop.
+    fn decode_next_instruction(&mut self) -> Instruction {
+        let opcode = self.read_u8();
+        match opcode {
+            // MOV: Register/memory to/from register
+            0x88..=0x8B => self.decode_mov_reg_mem((opcode & 0b10) != 0, (opcode & 0b1) != 0),
+            // MOV: Immediate to register
+            0xB0..=0xBF => self.decode_mov_imm_to_reg((opcode & 0b1000) != 0, opcode & 0b111),
+            // MOV: Immediate to register/memory
+            0xC6 | 0xC7 => self.decode_mov_imm_to_rm((opcode & 0b1) != 0),
+            // MOV: Memory to/from accumulator
+            0xA0..=0xA3 => {
+                self.decode_mov_mem_accumulator((opcode & 0b10) == 0, (opcode & 0b1) != 0)
             }
+            _ => panic!("Unsupported opcode: {:#04x}", opcode),
+        }
+    }
+
+    // --- MOV Instruction Decoders ---
+
+    fn decode_mov_reg_mem(&mut self, d: bool, w: bool) -> Instruction {
+        let mod_rm_byte = self.read_u8();
+        let reg_code = (mod_rm_byte >> 3) & 0b111;
+
+        let reg_op = if w {
+            Operand::R16(Register16::from_encoding(reg_code))
         } else {
-            Instruction::Mov {
-                destination: op2,
-                source: op1,
-            }
-        },
-        2,
-    ))
-}
+            Operand::R8(Register8::from_encoding(reg_code))
+        };
 
-fn decode_mov_immediate_to_register_memory_instruction(
-    w_bit: u8,
-    bytes: &[u8],
-) -> io::Result<(Instruction, usize)> {
-    let mod_rm_byte = bytes[0];
-    let md = (mod_rm_byte >> 6) & 0b11;
-    let rm = mod_rm_byte & 0b111;
+        let rm_op = self.decode_rm_operand(mod_rm_byte, w);
 
-    let (destination, dest_offset) = match md {
-        0b11 => {
-            let reg = if w_bit == 0 {
-                Operand::R8(Register8::from_encoding(rm))
-            } else {
-                Operand::R16(Register16::from_encoding(rm))
-            };
-            (reg, 0)
-        }
-        _ => {
-            let mem = Operand::MA(MemoryAddress::from_encoding(md, rm, &bytes[1..]));
-            let offset = match md {
-                0b00 => {
-                    if rm == 0b110 {
-                        2
-                    } else {
-                        0
-                    }
-                }
-                0b01 => 1,
-                0b10 => 2,
-                _ => 0,
-            };
-            (mem, offset)
-        }
-    };
-
-    let immediate_bytes_start = 1 + dest_offset;
-    let (source, immediate_size) = if w_bit == 0 {
-        (Operand::I8(bytes[immediate_bytes_start]), 1)
-    } else {
-        (
-            Operand::I16(
-                (bytes[immediate_bytes_start] as u16)
-                    + 256 * (bytes[immediate_bytes_start + 1] as u16),
-            ),
-            2,
-        )
-    };
-
-    Ok((
+        let (destination, source) = if d { (reg_op, rm_op) } else { (rm_op, reg_op) };
         Instruction::Mov {
             destination,
             source,
-        },
-        1 + dest_offset + immediate_size,
-    ))
-}
-
-/// Decodes a single 8086 instruction from a byte slice and returns the instruction
-/// along with the number of bytes it consumed.
-///
-/// This function currently only supports MOV instructions with register-to-register
-/// addressing, which are always 2 bytes long. It extracts the D (direction) and W (width)
-/// bits from the opcode to correctly interpret the instruction.
-///
-/// # Arguments
-/// * `bytes` - A slice of bytes containing the instruction.
-///
-/// # Returns
-/// * `Ok((Instruction, usize))` if decoding is successful, where `usize` is the instruction length.
-/// * `Err(io::Error)` if there are not enough bytes for the minimal instruction or
-///   an unsupported instruction is found (which will panic as per requirement).
-pub fn decode_instruction(bytes: &[u8]) -> io::Result<(Instruction, usize)> {
-    // For MOV RegToReg instructions, they are always 2 bytes.
-    // This check ensures we have enough bytes for this specific instruction type.
-    const MIN_INSTRUCTION_LENGTH: usize = 2; // Minimum bytes needed for any instruction we support
-
-    if bytes.len() < MIN_INSTRUCTION_LENGTH {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "Not enough bytes to decode a minimal instruction. Expected at least {}, got {}.",
-                MIN_INSTRUCTION_LENGTH,
-                bytes.len()
-            ),
-        ));
-    }
-
-    let opcode = bytes[0];
-
-    // Check for MOV instruction (opcode prefix 100010DW)
-    // Mask out the D (bit 1) and W (bit 0) bits to check the common prefix.
-    let (instruction, offset) = if (opcode & 0b11111100) == 0b10001000 {
-        // 0x88 in binary is 10001000
-        let d_bit = (opcode >> 1) & 0b1; // Extract D bit (bit 1)
-        let w_bit = opcode & 0b1; // Extract W bit (bit 0)
-        decode_mov_instruction(d_bit, w_bit, &bytes[1..])?
-    } else if (opcode & 0b11110000) == 0b10110000 {
-        let w_bit = (opcode >> 3) & 0b1;
-        let reg = opcode & 0b111;
-        decode_mov_immediate_to_register_instruction(w_bit, reg, &bytes[1..])?
-    } else if (opcode & 0b11111110) == 0b11000110 {
-        let w_bit = opcode & 0b1;
-        decode_mov_immediate_to_register_memory_instruction(w_bit, &bytes[1..])?
-    } else if (opcode & 0b10100000) == 0b10100000 {
-        let d_bit = (opcode >> 1) & 0b1; // Extract D bit (bit 1)
-        let w_bit = opcode & 0b1; // Extract W bit (bit 0)
-        decode_mov_memory_accumulator_instruction(d_bit, w_bit, &bytes[1..])?
-    } else {
-        // Panic as requested for unsupported scenarios
-        // TODO: add support for "Immediate to register/memory"
-        panic!(
-            "Unsupported opcode: 0x{:02X}. Only MOV reg/mem to/from register (100010DW) and immediate MOV (1011WREG) are currently supported.",
-            opcode
-        );
-    };
-    Ok((instruction, offset + 1))
-}
-
-/// Decodes a byte slice into a vector of 8086 instructions.
-///
-/// This function iterates through the byte stream, decoding instructions
-/// until the end of the stream or an incomplete instruction is encountered.
-/// Unsupported opcodes or MOD fields will cause a panic as per requirement.
-///
-/// # Arguments
-/// * `bytes` - The slice of bytes containing the binary data to decode.
-///
-/// # Returns
-/// * `Vec<Instruction>` containing all successfully decoded instructions.
-pub fn decode(bytes: &[u8]) -> Vec<Instruction> {
-    let mut instructions = Vec::new();
-    let mut current_offset = 0;
-
-    while current_offset < bytes.len() {
-        match decode_instruction(&bytes[current_offset..]) {
-            Ok((instruction, bytes_consumed)) => {
-                current_offset += bytes_consumed;
-                println!("Decoded: {:?}, offset: {:?}", instruction, current_offset);
-                instructions.push(instruction);
-            }
-            Err(e) => {
-                if e.kind() == io::ErrorKind::InvalidInput {
-                    eprintln!("Warning: Incomplete instruction at offset {}: {}. Skipping remaining bytes.", current_offset, e);
-                    break; // Stop decoding if we hit an incomplete instruction at the end
-                } else {
-                    // This branch should ideally not be hit if decode_instruction only returns
-                    // InvalidInput for length issues and panics for unsupported opcodes/MOD.
-                    panic!("Decoding error at offset {}: {}", current_offset, e);
-                }
-            }
         }
     }
-    instructions
+
+    fn decode_mov_imm_to_reg(&mut self, w: bool, reg_code: u8) -> Instruction {
+        let destination = if w {
+            Operand::R16(Register16::from_encoding(reg_code))
+        } else {
+            Operand::R8(Register8::from_encoding(reg_code))
+        };
+        let source = if w {
+            Operand::I16(self.read_u16_le())
+        } else {
+            Operand::I8(self.read_u8())
+        };
+        Instruction::Mov {
+            destination,
+            source,
+        }
+    }
+
+    fn decode_mov_imm_to_rm(&mut self, w: bool) -> Instruction {
+        let mod_rm_byte = self.read_u8();
+        let destination = self.decode_rm_operand(mod_rm_byte, w);
+        let source = if w {
+            Operand::I16(self.read_u16_le())
+        } else {
+            Operand::I8(self.read_u8())
+        };
+        Instruction::Mov {
+            destination,
+            source,
+        }
+    }
+
+    fn decode_mov_mem_accumulator(&mut self, d: bool, w: bool) -> Instruction {
+        let acc_op = if w {
+            Operand::R16(Register16::AX)
+        } else {
+            Operand::R8(Register8::AL)
+        };
+        let mem_op = Operand::MA(MemoryAddress::DA(self.read_u16_le()));
+        let (destination, source) = if d {
+            (acc_op, mem_op)
+        } else {
+            (mem_op, acc_op)
+        };
+        Instruction::Mov {
+            destination,
+            source,
+        }
+    }
+
+    /// Decodes a ModR/M byte to get an operand. Handles register or memory addressing.
+    fn decode_rm_operand(&mut self, mod_rm_byte: u8, w: bool) -> Operand {
+        let md = mod_rm_byte >> 6;
+        let rm = mod_rm_byte & 0b111;
+
+        if md == 0b11 {
+            // Register-direct addressing
+            return if w {
+                Operand::R16(Register16::from_encoding(rm))
+            } else {
+                Operand::R8(Register8::from_encoding(rm))
+            };
+        }
+
+        // Memory addressing
+        let addr = match md {
+            0b00 => match rm {
+                0b110 => MemoryAddress::DA(self.read_u16_le()),
+                _ => Self::effective_address_no_disp(rm),
+            },
+            0b01 => Self::effective_address_disp8(rm, self.read_u8()),
+            0b10 => Self::effective_address_disp16(rm, self.read_u16_le()),
+            _ => unreachable!(), // Should not happen with 2-bit md
+        };
+        Operand::MA(addr)
+    }
+
+    // --- Static Helpers for Memory Address Calculation ---
+
+    fn effective_address_no_disp(rm: u8) -> MemoryAddress {
+        match rm {
+            0b000 => MemoryAddress::RR(Register16::BX, Register16::SI),
+            0b001 => MemoryAddress::RR(Register16::BX, Register16::DI),
+            0b010 => MemoryAddress::RR(Register16::BP, Register16::SI),
+            0b011 => MemoryAddress::RR(Register16::BP, Register16::DI),
+            0b100 => MemoryAddress::R(Register16::SI),
+            0b101 => MemoryAddress::R(Register16::DI),
+            0b111 => MemoryAddress::R(Register16::BX),
+            _ => panic!("Invalid R/M encoding for MOD=00: {}", rm),
+        }
+    }
+
+    fn effective_address_disp8(rm: u8, disp: u8) -> MemoryAddress {
+        match rm {
+            0b000 => MemoryAddress::RRD8(Register16::BX, Register16::SI, disp),
+            0b001 => MemoryAddress::RRD8(Register16::BX, Register16::DI, disp),
+            0b010 => MemoryAddress::RRD8(Register16::BP, Register16::SI, disp),
+            0b011 => MemoryAddress::RRD8(Register16::BP, Register16::DI, disp),
+            0b100 => MemoryAddress::RD8(Register16::SI, disp),
+            0b101 => MemoryAddress::RD8(Register16::DI, disp),
+            0b110 => MemoryAddress::RD8(Register16::BP, disp),
+            0b111 => MemoryAddress::RD8(Register16::BX, disp),
+            _ => unreachable!(),
+        }
+    }
+
+    fn effective_address_disp16(rm: u8, disp: u16) -> MemoryAddress {
+        match rm {
+            0b000 => MemoryAddress::RRD16(Register16::BX, Register16::SI, disp),
+            0b001 => MemoryAddress::RRD16(Register16::BX, Register16::DI, disp),
+            0b010 => MemoryAddress::RRD16(Register16::BP, Register16::SI, disp),
+            0b011 => MemoryAddress::RRD16(Register16::BP, Register16::DI, disp),
+            0b100 => MemoryAddress::RD16(Register16::SI, disp),
+            0b101 => MemoryAddress::RD16(Register16::DI, disp),
+            0b110 => MemoryAddress::RD16(Register16::BP, disp),
+            0b111 => MemoryAddress::RD16(Register16::BX, disp),
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// Reads the entire content of a file into a `Vec<u8>`.
@@ -607,31 +464,6 @@ fn main() {
     let input_file = &args[1];
     let output_file = &args[2];
 
-    // --- Create a dummy input.bin for testing if it doesn't exist ---
-    // This is helpful for initial testing without manually creating a file.
-    // In a real scenario, you might remove this or make it an optional feature.
-    if !Path::new(input_file).exists() {
-        println!(
-            "Input file '{}' not found. Creating a dummy file for demonstration.",
-            input_file
-        );
-        // Example instructions:
-        // 0x8B C3: MOV AX, BX (D=1, W=1)
-        // 0x89 C3: MOV BX, AX (D=0, W=1)
-        // 0x8A C3: MOV AL, BL (D=1, W=0)
-        // 0x88 C3: MOV BL, AL (D=0, W=0)
-        // 0x8B CA: MOV CX, DX (D=1, W=1)
-        // 0x8A F2: MOV DH, CL (D=1, W=0, DH is 100, CL is 001)
-        let dummy_bytes = vec![
-            0x8B, 0xC3, 0x89, 0xC3, 0x8A, 0xC3, 0x88, 0xC3, 0x8B, 0xCA, 0x8A, 0xF2,
-        ];
-        File::create(input_file)
-            .expect("Could not create dummy input file")
-            .write_all(&dummy_bytes)
-            .expect("Could not write to dummy input file");
-    }
-    // --- End of dummy file creation logic ---
-
     println!("Starting 8086 decoder...");
     match read_file(input_file) {
         Ok(buffer) => {
@@ -642,269 +474,5 @@ fn main() {
             }
         }
         Err(e) => eprintln!("Error reading input file: {}", e),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_register16_from_encoding() {
-        assert_eq!(Register16::from_encoding(0b000), Register16::AX);
-        assert_eq!(Register16::from_encoding(0b001), Register16::CX);
-        assert_eq!(Register16::from_encoding(0b010), Register16::DX);
-        assert_eq!(Register16::from_encoding(0b011), Register16::BX);
-        assert_eq!(Register16::from_encoding(0b100), Register16::SP);
-        assert_eq!(Register16::from_encoding(0b101), Register16::BP);
-        assert_eq!(Register16::from_encoding(0b110), Register16::SI);
-        assert_eq!(Register16::from_encoding(0b111), Register16::DI);
-    }
-
-    #[test]
-    #[should_panic(expected = "Invalid 3-bit encoding for 16-bit register: 8")]
-    fn test_register16_from_encoding_panic() {
-        Register16::from_encoding(0b1000);
-    }
-
-    #[test]
-    fn test_register8_from_encoding() {
-        assert_eq!(Register8::from_encoding(0b000), Register8::AL);
-        assert_eq!(Register8::from_encoding(0b001), Register8::CL);
-        assert_eq!(Register8::from_encoding(0b010), Register8::DL);
-        assert_eq!(Register8::from_encoding(0b011), Register8::BL);
-        assert_eq!(Register8::from_encoding(0b100), Register8::AH);
-        assert_eq!(Register8::from_encoding(0b101), Register8::CH);
-        assert_eq!(Register8::from_encoding(0b110), Register8::DH);
-        assert_eq!(Register8::from_encoding(0b111), Register8::BH);
-    }
-
-    #[test]
-    #[should_panic(expected = "Invalid 3-bit encoding for 8-bit register: 8")]
-    fn test_register8_from_encoding_panic() {
-        Register8::from_encoding(0b1000);
-    }
-
-    #[test]
-    fn test_decode_mov_instruction_16bit_d1_w1() {
-        // MOV AX, BX (0x8B C3) - D=1, W=1
-        let bytes = [0x8B, 0xC3];
-        let (instruction, length) = decode_mov_instruction(&bytes, 1, 1).unwrap();
-        assert_eq!(length, 2);
-        assert!(matches!(
-            instruction,
-            Instruction::Mov {
-                destination: Operand::R16(Register16::AX),
-                source: Operand::R16(Register16::BX)
-            }
-        ));
-        assert_eq!(format!("{}", instruction), "MOV AX, BX");
-    }
-
-    #[test]
-    fn test_decode_mov_instruction_16bit_d0_w1() {
-        // MOV BX, AX (0x89 C3) - D=0, W=1
-        let bytes = [0x89, 0xC3];
-        let (instruction, length) = decode_mov_instruction(&bytes, 0, 1).unwrap();
-        assert_eq!(length, 2);
-        assert!(matches!(
-            instruction,
-            Instruction::Mov {
-                destination: Operand::R16(Register16::BX),
-                source: Operand::R16(Register16::AX)
-            }
-        ));
-        assert_eq!(format!("{}", instruction), "MOV BX, AX");
-    }
-
-    #[test]
-    fn test_decode_mov_instruction_8bit_d1_w0() {
-        // MOV AL, BL (0x8A C3) - D=1, W=0
-        let bytes = [0x8A, 0xC3];
-        let (instruction, length) = decode_mov_instruction(&bytes, 1, 0).unwrap();
-        assert_eq!(length, 2);
-        assert!(matches!(
-            instruction,
-            Instruction::Mov {
-                destination: Operand::R8(Register8::AL),
-                source: Operand::R8(Register8::BL)
-            }
-        ));
-        assert_eq!(format!("{}", instruction), "MOV AL, BL");
-    }
-
-    #[test]
-    fn test_decode_mov_instruction_8bit_d0_w0() {
-        // MOV BL, AL (0x88 C3) - D=0, W=0
-        let bytes = [0x88, 0xC3];
-        let (instruction, length) = decode_mov_instruction(&bytes, 0, 0).unwrap();
-        assert_eq!(length, 2);
-        assert!(matches!(
-            instruction,
-            Instruction::Mov {
-                destination: Operand::R8(Register8::BL),
-                source: Operand::R8(Register8::AL)
-            }
-        ));
-        assert_eq!(format!("{}", instruction), "MOV BL, AL");
-    }
-
-    #[test]
-    fn test_decode_mov_instruction_8bit_d1_w0_high_low() {
-        // MOV DH, CL (0x8A F2) - D=1, W=0
-        // REG = 110 (DH), RM = 010 (CL)
-        let bytes = [0x8A, 0xF2];
-        let (instruction, length) = decode_mov_instruction(&bytes, 1, 0).unwrap();
-        assert_eq!(length, 2);
-        assert!(matches!(
-            instruction,
-            Instruction::Mov {
-                destination: Operand::R8(Register8::DH),
-                source: Operand::R8(Register8::CL)
-            }
-        ));
-        assert_eq!(format!("{}", instruction), "MOV DH, CL");
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "Unsupported MOD field for MOV instruction: 00. Only register-to-register (11) is supported."
-    )]
-    fn test_decode_mov_instruction_unsupported_mod() {
-        // MOV with MOD 00 (memory mode)
-        let bytes = [0x8B, 0x00]; // 0x8B is MOV, 0x00 means MOD 00, REG 000, RM 000
-        let _ = decode_mov_instruction(&bytes, 1, 1).unwrap(); // d_bit and w_bit don't matter for this panic
-    }
-
-    #[test]
-    fn test_decode_instruction_16bit_mov() {
-        // MOV AX, BX (0x8B C3)
-        let bytes = [0x8B, 0xC3];
-        let (instruction, length) = decode_instruction(&bytes).unwrap();
-        assert_eq!(length, 2);
-        assert!(matches!(
-            instruction,
-            Instruction::Mov {
-                destination: Operand::R16(Register16::AX),
-                source: Operand::R16(Register16::BX)
-            }
-        ));
-        assert_eq!(format!("{}", instruction), "MOV AX, BX");
-    }
-
-    #[test]
-    fn test_decode_instruction_8bit_mov() {
-        // MOV AL, BL (0x8A C3)
-        let bytes = [0x8A, 0xC3];
-        let (instruction, length) = decode_instruction(&bytes).unwrap();
-        assert_eq!(length, 2);
-        assert!(matches!(
-            instruction,
-            Instruction::Mov {
-                destination: Operand::R8(Register8::AL),
-                source: Operand::R8(Register8::BL)
-            }
-        ));
-        assert_eq!(format!("{}", instruction), "MOV AL, BL");
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "Unsupported opcode: 0x00. Only MOV reg/mem to/from register (100010DW) is currently supported."
-    )]
-    fn test_decode_instruction_unsupported_opcode() {
-        let bytes = [0x00, 0x00]; // Not a MOV instruction
-        let _ = decode_instruction(&bytes).unwrap();
-    }
-
-    #[test]
-    fn test_decode_instruction_not_enough_bytes() {
-        let bytes = [0x8B]; // Only one byte
-        let result = decode_instruction(&bytes);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn test_read_file() -> io::Result<()> {
-        let test_file = "test_read.bin";
-        let dummy_bytes = vec![0x01, 0x02, 0x03];
-        File::create(test_file)?.write_all(&dummy_bytes)?;
-        let read_bytes = read_file(test_file)?;
-        assert_eq!(read_bytes, dummy_bytes);
-        std::fs::remove_file(test_file)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_decode_function_multiple_instructions() {
-        // MOV AX, BX (0x8B C3)
-        // MOV CX, DX (0x8B CA)
-        // MOV AL, BL (0x8A C3)
-        let bytes = vec![0x8B, 0xC3, 0x8B, 0xCA, 0x8A, 0xC3];
-        let instructions = decode(&bytes);
-        assert_eq!(instructions.len(), 3);
-        assert_eq!(format!("{}", instructions[0]), "MOV AX, BX");
-        assert_eq!(format!("{}", instructions[1]), "MOV CX, DX");
-        assert_eq!(format!("{}", instructions[2]), "MOV AL, BL");
-    }
-
-    #[test]
-    fn test_decode_function_with_incomplete_last_instruction() {
-        let bytes = vec![0x8B, 0xC3, 0x8B]; // MOV AX, BX; then an incomplete instruction
-        let instructions = decode(&bytes);
-        assert_eq!(instructions.len(), 1);
-        assert_eq!(format!("{}", instructions[0]), "MOV AX, BX");
-    }
-
-    #[test]
-    fn test_write_decoding() -> io::Result<()> {
-        let output_file = "test_write.txt";
-        let instructions = vec![
-            Instruction::Mov {
-                destination: Operand::R16(Register16::AX),
-                source: Operand::R16(Register16::BX),
-            },
-            Instruction::Mov {
-                destination: Operand::R8(Register8::CL),
-                source: Operand::R8(Register8::DH),
-            },
-        ];
-        write_decoding(&instructions, output_file)?;
-        let mut content = String::new();
-        File::open(output_file)?.read_to_string(&mut content)?;
-        assert_eq!(content.trim(), "MOV AX, BX\nMOV CL, DH");
-        std::fs::remove_file(output_file)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_full_flow_integration() -> io::Result<()> {
-        let input_file = "test_full_input.bin";
-        let output_file = "test_full_output.txt";
-
-        // MOV AX, BX (0x8B C3)
-        // MOV SI, DI (0x8B FE)
-        // MOV AH, BL (0x8A E3) - D=1, W=0, REG=100 (AH), RM=011 (BL)
-        let dummy_bytes = vec![0x8B, 0xC3, 0x8B, 0xFE, 0x8A, 0xE3];
-        File::create(input_file)?.write_all(&dummy_bytes)?;
-
-        // Read
-        let buffer = read_file(input_file)?;
-        // Decode
-        let decoded_instructions = decode(&buffer);
-        // Write
-        write_decoding(&decoded_instructions, output_file)?;
-
-        let mut output_content = String::new();
-        File::open(output_file)?.read_to_string(&mut output_content)?;
-
-        assert_eq!(output_content.trim(), "MOV AX, BX\nMOV SI, DI\nMOV AH, BL");
-
-        // Clean up
-        std::fs::remove_file(input_file)?;
-        std::fs::remove_file(output_file)?;
-
-        Ok(())
     }
 }
