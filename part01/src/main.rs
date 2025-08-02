@@ -1,9 +1,8 @@
-use core::panic;
-use std::env; // Import the env module for command-line arguments
+use std::env;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::path::Path; // Import the fmt module for Display trait
+use std::path::Path;
 
 // --- Main public API ---
 
@@ -56,7 +55,6 @@ impl Register16 {
 
 impl fmt::Display for Register16 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // Use a more direct mapping for lowercase assembly convention
         write!(
             f,
             "{}",
@@ -198,22 +196,50 @@ impl fmt::Display for Operand {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum BinaryOp {
+    MOV,
+    ADD,
+    SUB,
+    CMP,
+}
+
+impl BinaryOp {
+    fn arithmetic_op_from_encoding(op: u8) -> Self {
+        match op {
+            0b000 => BinaryOp::ADD,
+            0b101 => BinaryOp::SUB,
+            0b111 => BinaryOp::CMP,
+            _ => panic!("Unsupported arithmetic operation encoding: {}", op),
+        }
+    }
+}
+
+impl fmt::Display for BinaryOp {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::MOV => "mov",
+                Self::ADD => "add",
+                Self::SUB => "sub",
+                Self::CMP => "cmp",
+            }
+        )
+    }
+}
+
 /// Represents a decoded 8086 instruction.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Instruction {
-    Mov {
-        destination: Operand,
-        source: Operand,
-    },
+    BO(BinaryOp, Operand, Operand),
 }
 
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Mov {
-                destination,
-                source,
-            } => write!(f, "mov {}, {}", destination, source),
+            Self::BO(op, dest, src) => write!(f, "{} {}, {}", op, dest, src),
         }
     }
 }
@@ -257,114 +283,159 @@ impl<'a> Decoder<'a> {
     /// Main instruction decoding loop.
     fn decode_next_instruction(&mut self) -> Instruction {
         let opcode = self.read_u8();
-        match opcode {
+        let instr = match opcode {
+            // Arithmetic: Register/memory with register
+            0x00..=0x03 | 0x28..=0x2B | 0x38..=0x3B => self.decode_arithmetic_reg_mem(opcode),
+            // Arithmetic: Immediate to accumulator
+            0x04 | 0x05 | 0x2C | 0x2D | 0x3C | 0x3D => self.decode_arithmetic_imm_to_acc(opcode),
+            // Arithmetic: Immediate to Register/memory
+            0x80..=0x83 => self.decode_arithmetic_imm_to_rm(opcode),
             // MOV: Register/memory to/from register
-            0x88..=0x8B => self.decode_mov_reg_mem((opcode & 0b10) != 0, (opcode & 0b1) != 0),
-            // MOV: Immediate to register
-            0xB0..=0xBF => self.decode_mov_imm_to_reg((opcode & 0b1000) != 0, opcode & 0b111),
-            // MOV: Immediate to register/memory
-            0xC6 | 0xC7 => self.decode_mov_imm_to_rm((opcode & 0b1) != 0),
+            0x88..=0x8B => self.decode_mov_reg_mem(opcode),
             // MOV: Memory to/from accumulator
-            0xA0..=0xA3 => {
-                self.decode_mov_mem_accumulator((opcode & 0b10) == 0, (opcode & 0b1) != 0)
-            }
+            0xA0..=0xA3 => self.decode_mov_mem_accumulator(opcode),
+            // MOV: Immediate to register
+            0xB0..=0xBF => self.decode_mov_imm_to_reg(opcode),
+            // MOV: Immediate to register/memory
+            0xC6 | 0xC7 => self.decode_mov_imm_to_rm(opcode),
             _ => panic!("Unsupported opcode: {:#04x}", opcode),
-        }
+        };
+        println!("{}", instr); // Uncomment for debugging
+        instr
     }
 
-    // --- MOV Instruction Decoders ---
+    // --- Instruction Format Decoders ---
 
-    fn decode_mov_reg_mem(&mut self, d: bool, w: bool) -> Instruction {
+    fn decode_arithmetic_reg_mem(&mut self, opcode: u8) -> Instruction {
+        let op = BinaryOp::arithmetic_op_from_encoding((opcode >> 3) & 0b111);
+        let d = (opcode & 0b10) != 0;
+        let w = (opcode & 0b1) != 0;
+        let mod_rm_byte = self.read_u8();
+        let reg_op = if w {
+            Operand::R16(Register16::from_encoding((mod_rm_byte >> 3) & 0b111))
+        } else {
+            Operand::R8(Register8::from_encoding((mod_rm_byte >> 3) & 0b111))
+        };
+        let rm_op = self.decode_rm_operand(mod_rm_byte, w);
+        let (dest, src) = if d { (reg_op, rm_op) } else { (rm_op, reg_op) };
+        Instruction::BO(op, dest, src)
+    }
+
+    fn decode_arithmetic_imm_to_rm(&mut self, opcode: u8) -> Instruction {
+        let w = (opcode & 0b1) != 0;
+        let mod_rm_byte = self.read_u8();
+        let op = BinaryOp::arithmetic_op_from_encoding((mod_rm_byte >> 3) & 0b111);
+        let dest = self.decode_rm_operand(mod_rm_byte, w);
+        let src = if w {
+            if opcode == 0x83 {
+                Operand::I16(self.read_u8() as i8 as u16)
+            } else {
+                Operand::I16(self.read_u16_le())
+            }
+        } else {
+            Operand::I8(self.read_u8())
+        };
+        Instruction::BO(op, dest, src)
+    }
+
+    fn decode_arithmetic_imm_to_acc(&mut self, opcode: u8) -> Instruction {
+        let op = BinaryOp::arithmetic_op_from_encoding((opcode >> 3) & 0b111);
+        let w = (opcode & 0b1) != 0;
+        let dest = if w {
+            Operand::R16(Register16::AX)
+        } else {
+            Operand::R8(Register8::AL)
+        };
+        let src = if w {
+            Operand::I16(self.read_u16_le())
+        } else {
+            Operand::I8(self.read_u8())
+        };
+        Instruction::BO(op, dest, src)
+    }
+
+    fn decode_mov_reg_mem(&mut self, opcode: u8) -> Instruction {
+        let d = (opcode & 0b10) != 0;
+        let w = (opcode & 0b1) != 0;
         let mod_rm_byte = self.read_u8();
         let reg_code = (mod_rm_byte >> 3) & 0b111;
-
         let reg_op = if w {
             Operand::R16(Register16::from_encoding(reg_code))
         } else {
             Operand::R8(Register8::from_encoding(reg_code))
         };
-
         let rm_op = self.decode_rm_operand(mod_rm_byte, w);
-
-        let (destination, source) = if d { (reg_op, rm_op) } else { (rm_op, reg_op) };
-        Instruction::Mov {
-            destination,
-            source,
-        }
+        let (dest, src) = if d { (reg_op, rm_op) } else { (rm_op, reg_op) };
+        Instruction::BO(BinaryOp::MOV, dest, src)
     }
 
-    fn decode_mov_imm_to_reg(&mut self, w: bool, reg_code: u8) -> Instruction {
-        let destination = if w {
+    fn decode_mov_imm_to_reg(&mut self, opcode: u8) -> Instruction {
+        let w = (opcode & 0b1000) != 0;
+        let reg_code = opcode & 0b111;
+        let dest = if w {
             Operand::R16(Register16::from_encoding(reg_code))
         } else {
             Operand::R8(Register8::from_encoding(reg_code))
         };
-        let source = if w {
+        let src = if w {
             Operand::I16(self.read_u16_le())
         } else {
             Operand::I8(self.read_u8())
         };
-        Instruction::Mov {
-            destination,
-            source,
-        }
+        Instruction::BO(BinaryOp::MOV, dest, src)
     }
 
-    fn decode_mov_imm_to_rm(&mut self, w: bool) -> Instruction {
+    fn decode_mov_imm_to_rm(&mut self, opcode: u8) -> Instruction {
+        let w = (opcode & 0b1) != 0;
         let mod_rm_byte = self.read_u8();
-        let destination = self.decode_rm_operand(mod_rm_byte, w);
-        let source = if w {
+        let dest = self.decode_rm_operand(mod_rm_byte, w);
+        let src = if w {
             Operand::I16(self.read_u16_le())
         } else {
             Operand::I8(self.read_u8())
         };
-        Instruction::Mov {
-            destination,
-            source,
-        }
+        Instruction::BO(BinaryOp::MOV, dest, src)
     }
 
-    fn decode_mov_mem_accumulator(&mut self, d: bool, w: bool) -> Instruction {
+    fn decode_mov_mem_accumulator(&mut self, opcode: u8) -> Instruction {
+        let d = (opcode & 0b10) == 0;
+        let w = (opcode & 0b1) != 0;
         let acc_op = if w {
             Operand::R16(Register16::AX)
         } else {
             Operand::R8(Register8::AL)
         };
         let mem_op = Operand::MA(MemoryAddress::DA(self.read_u16_le()));
-        let (destination, source) = if d {
+        let (dest, src) = if d {
             (acc_op, mem_op)
         } else {
             (mem_op, acc_op)
         };
-        Instruction::Mov {
-            destination,
-            source,
-        }
+        Instruction::BO(BinaryOp::MOV, dest, src)
     }
 
     /// Decodes a ModR/M byte to get an operand. Handles register or memory addressing.
     fn decode_rm_operand(&mut self, mod_rm_byte: u8, w: bool) -> Operand {
         let md = mod_rm_byte >> 6;
         let rm = mod_rm_byte & 0b111;
-
         if md == 0b11 {
-            // Register-direct addressing
             return if w {
                 Operand::R16(Register16::from_encoding(rm))
             } else {
                 Operand::R8(Register8::from_encoding(rm))
             };
         }
-
-        // Memory addressing
         let addr = match md {
-            0b00 => match rm {
-                0b110 => MemoryAddress::DA(self.read_u16_le()),
-                _ => Self::effective_address_no_disp(rm),
-            },
+            0b00 => {
+                if rm == 0b110 {
+                    MemoryAddress::DA(self.read_u16_le())
+                } else {
+                    Self::effective_address_no_disp(rm)
+                }
+            }
             0b01 => Self::effective_address_disp8(rm, self.read_u8()),
             0b10 => Self::effective_address_disp16(rm, self.read_u16_le()),
-            _ => unreachable!(), // Should not happen with 2-bit md
+            _ => unreachable!(),
         };
         Operand::MA(addr)
     }
@@ -413,14 +484,8 @@ impl<'a> Decoder<'a> {
     }
 }
 
-/// Reads the entire content of a file into a `Vec<u8>`.
-///
-/// # Arguments
-/// * `filepath` - The path to the input binary file.
-///
-/// # Returns
-/// * `Ok(Vec<u8>)` if reading is successful.
-/// * `Err(io::Error)` if an I/O error occurs.
+// --- File I/O and Main Function ---
+
 pub fn read_file<P: AsRef<Path>>(filepath: P) -> io::Result<Vec<u8>> {
     let mut file = File::open(filepath)?;
     let mut buffer = Vec::new();
@@ -428,36 +493,21 @@ pub fn read_file<P: AsRef<Path>>(filepath: P) -> io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
-/// Writes a vector of decoded 8086 instructions to a specified output file.
-///
-/// Each instruction is formatted into a human-readable string and written on a new line.
-///
-/// # Arguments
-/// * `instructions` - A slice of `Instruction` enums to write.
-/// * `output_filepath` - The path to the output text file.
-///
-/// # Errors
-/// * `Err(io::Error)` if an I/O error occurs during file writing.
 pub fn write_decoding<P: AsRef<Path>>(
     instructions: &[Instruction],
     output_filepath: P,
 ) -> io::Result<()> {
     let mut output_file = File::create(output_filepath)?;
     for instruction in instructions {
-        // Use the Display trait implementation for formatting
         writeln!(output_file, "{}", instruction)?;
     }
     Ok(())
 }
 
 fn main() {
-    // Collect command-line arguments
     let args: Vec<String> = env::args().collect();
-
-    // Expect 3 arguments: program name, input file, output file
     if args.len() != 3 {
         eprintln!("Usage: {} <input_binary_file> <output_text_file>", args[0]);
-        // Exit with a non-zero status code to indicate an error
         std::process::exit(1);
     }
 
