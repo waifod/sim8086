@@ -311,17 +311,20 @@ impl<'a> Decoder<'a> {
         };
 
         // --- Printing for debugging purposes ---
-        println!(
-            "Starting position: {}\nProcessed: {} bytes\nBytes: {}\n{}\n",
-            start_pos,
-            self.pos - start_pos,
-            self.bytes[start_pos..self.pos]
-                .iter()
-                .map(|n| format!("{:08b}", n))
-                .collect::<Vec<_>>()
-                .join(", "),
-            instr
-        );
+        #[cfg(debug_assertions)]
+        {
+            println!(
+                "Starting position: {}\nProcessed: {} bytes\nBytes: {}\n{}\n",
+                start_pos,
+                self.pos - start_pos,
+                self.bytes[start_pos..self.pos]
+                    .iter()
+                    .map(|n| format!("{:08b}", n))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                instr
+            );
+        }
         // ---------------------------------------
 
         instr
