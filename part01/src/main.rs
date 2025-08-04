@@ -131,8 +131,8 @@ pub enum Operand {
     R8(Register8),
     R16(Register16),
     MA(MemoryAddress),
-    I8(u8),
-    I16(u16),
+    IMM8(u8),
+    IMM16(u16),
 }
 
 impl fmt::Display for Operand {
@@ -141,8 +141,8 @@ impl fmt::Display for Operand {
             Self::R8(reg) => write!(f, "{}", reg),
             Self::R16(reg) => write!(f, "{}", reg),
             Self::MA(addr) => write!(f, "{}", addr),
-            Self::I8(val) => write!(f, "byte {}", val),
-            Self::I16(val) => write!(f, "word {}", val),
+            Self::IMM8(val) => write!(f, "byte {}", val),
+            Self::IMM16(val) => write!(f, "word {}", val),
         }
     }
 }
@@ -372,12 +372,12 @@ impl<'a> Decoder<'a> {
         let dest = self.decode_rm_operand(mod_rm_byte, w);
         let src = if w {
             if opcode == 0x83 {
-                Operand::I16(self.read_u8() as i8 as u16)
+                Operand::IMM16(self.read_u8() as i8 as u16)
             } else {
-                Operand::I16(self.read_u16_le())
+                Operand::IMM16(self.read_u16_le())
             }
         } else {
-            Operand::I8(self.read_u8())
+            Operand::IMM8(self.read_u8())
         };
         Instruction::BO(op, dest, src)
     }
@@ -391,9 +391,9 @@ impl<'a> Decoder<'a> {
             Operand::R8(Register8::AL)
         };
         let src = if w {
-            Operand::I16(self.read_u16_le())
+            Operand::IMM16(self.read_u16_le())
         } else {
-            Operand::I8(self.read_u8())
+            Operand::IMM8(self.read_u8())
         };
         Instruction::BO(op, dest, src)
     }
@@ -426,9 +426,9 @@ impl<'a> Decoder<'a> {
             Operand::R8(reg)
         };
         let src = if w {
-            Operand::I16(self.read_u16_le())
+            Operand::IMM16(self.read_u16_le())
         } else {
-            Operand::I8(self.read_u8())
+            Operand::IMM8(self.read_u8())
         };
         Instruction::BO(BinaryOp::MOV, dest, src)
     }
@@ -438,9 +438,9 @@ impl<'a> Decoder<'a> {
         let mod_rm_byte = self.read_u8();
         let dest = self.decode_rm_operand(mod_rm_byte, w);
         let src = if w {
-            Operand::I16(self.read_u16_le())
+            Operand::IMM16(self.read_u16_le())
         } else {
-            Operand::I8(self.read_u8())
+            Operand::IMM8(self.read_u8())
         };
         Instruction::BO(BinaryOp::MOV, dest, src)
     }
