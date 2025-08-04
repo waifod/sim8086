@@ -1,5 +1,5 @@
-# computer_enhance_coursework
-Personal work produced while following Casey Muratori's ["Computer, Enhance!" course](https://computerenhance.com).
+# sim8086
+Simulator of the Intel 8086 architecture produced while following Casey Muratori's ["Computer, Enhance!" course](https://computerenhance.com).
 
 The source code was developed in Rust on a modern Linux-based operating system.
 
