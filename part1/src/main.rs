@@ -29,23 +29,6 @@ pub fn decode(bytes: &[u8]) -> Vec<Instruction> {
 /// This replaces the separate Register8 and Register16 enums.
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Display)]
 pub enum Register {
-    // 16-bit registers (w=1)
-    #[strum(serialize = "ax")]
-    AX,
-    #[strum(serialize = "cx")]
-    CX,
-    #[strum(serialize = "dx")]
-    DX,
-    #[strum(serialize = "bx")]
-    BX,
-    #[strum(serialize = "sp")]
-    SP,
-    #[strum(serialize = "bp")]
-    BP,
-    #[strum(serialize = "si")]
-    SI,
-    #[strum(serialize = "di")]
-    DI,
     // 8-bit registers (w=0)
     #[strum(serialize = "al")]
     AL,
@@ -63,6 +46,23 @@ pub enum Register {
     DH,
     #[strum(serialize = "bh")]
     BH,
+    // 16-bit registers (w=1)
+    #[strum(serialize = "ax")]
+    AX,
+    #[strum(serialize = "cx")]
+    CX,
+    #[strum(serialize = "dx")]
+    DX,
+    #[strum(serialize = "bx")]
+    BX,
+    #[strum(serialize = "sp")]
+    SP,
+    #[strum(serialize = "bp")]
+    BP,
+    #[strum(serialize = "si")]
+    SI,
+    #[strum(serialize = "di")]
+    DI,
 }
 
 /// A lookup table for all general-purpose registers, indexed by the W-bit
@@ -439,7 +439,7 @@ impl<'a> Decoder<'a> {
         let dest_reg = REGISTERS
             .get(w as usize)
             .expect("Invalid W bit for accumulator register")
-            .get(0)
+            .first()
             .expect("Missing accumulator register");
         let dest = Operand::R(*dest_reg);
         let src = if w {
@@ -485,7 +485,7 @@ impl<'a> Decoder<'a> {
         let acc_reg = REGISTERS
             .get(w as usize)
             .expect("Invalid W bit for accumulator register")
-            .get(0)
+            .first()
             .expect("Missing accumulator register");
         let acc_op = Operand::R(*acc_reg);
         let mem_op = Operand::MA(MemoryAddress::DA(self.read_u16_le()));
