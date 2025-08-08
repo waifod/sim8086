@@ -1,4 +1,3 @@
-use num_enum::TryFromPrimitive;
 use std::env;
 use std::fmt;
 use std::fs::File;
@@ -24,62 +23,87 @@ pub fn decode(bytes: &[u8]) -> Vec<Instruction> {
     instructions
 }
 
-// --- Instruction and Operand Enums ---
+// --- Instruction and Operand Enums and Constants ---
 
-/// Represents the 16-bit general-purpose registers of the 8086.
-// Derived traits automatically handle Display and conversion from u8.
-#[derive(Debug, PartialEq, Eq, Copy, Clone, Display, TryFromPrimitive)]
-#[repr(u8)]
-pub enum Register16 {
+/// Represents a single 8-bit or 16-bit general-purpose register of the 8086.
+/// This replaces the separate Register8 and Register16 enums.
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Display)]
+pub enum Register {
+    // 16-bit registers (w=1)
     #[strum(serialize = "ax")]
-    AX = 0b000,
+    AX,
     #[strum(serialize = "cx")]
-    CX = 0b001,
+    CX,
     #[strum(serialize = "dx")]
-    DX = 0b010,
+    DX,
     #[strum(serialize = "bx")]
-    BX = 0b011,
+    BX,
     #[strum(serialize = "sp")]
-    SP = 0b100,
+    SP,
     #[strum(serialize = "bp")]
-    BP = 0b101,
+    BP,
     #[strum(serialize = "si")]
-    SI = 0b110,
+    SI,
     #[strum(serialize = "di")]
-    DI = 0b111,
+    DI,
+    // 8-bit registers (w=0)
+    #[strum(serialize = "al")]
+    AL,
+    #[strum(serialize = "cl")]
+    CL,
+    #[strum(serialize = "dl")]
+    DL,
+    #[strum(serialize = "bl")]
+    BL,
+    #[strum(serialize = "ah")]
+    AH,
+    #[strum(serialize = "ch")]
+    CH,
+    #[strum(serialize = "dh")]
+    DH,
+    #[strum(serialize = "bh")]
+    BH,
 }
 
-/// Represents the 8-bit general-purpose registers of the 8086.
-#[derive(Debug, PartialEq, Eq, Copy, Clone, Display, TryFromPrimitive)]
-#[repr(u8)]
-pub enum Register8 {
-    #[strum(serialize = "al")]
-    AL = 0b000,
-    #[strum(serialize = "cl")]
-    CL = 0b001,
-    #[strum(serialize = "dl")]
-    DL = 0b010,
-    #[strum(serialize = "bl")]
-    BL = 0b011,
-    #[strum(serialize = "ah")]
-    AH = 0b100,
-    #[strum(serialize = "ch")]
-    CH = 0b101,
-    #[strum(serialize = "dh")]
-    DH = 0b110,
-    #[strum(serialize = "bh")]
-    BH = 0b111,
-}
+/// A lookup table for all general-purpose registers, indexed by the W-bit
+/// and the 3-bit register field (REG).
+///
+/// `REGISTERS[w][reg]` will yield the correct register.
+/// `w=0` is for 8-bit registers, `w=1` is for 16-bit registers.
+const REGISTERS: [[Register; 8]; 2] = [
+    // w=0: 8-bit registers
+    [
+        Register::AL,
+        Register::CL,
+        Register::DL,
+        Register::BL,
+        Register::AH,
+        Register::CH,
+        Register::DH,
+        Register::BH,
+    ],
+    // w=1: 16-bit registers
+    [
+        Register::AX,
+        Register::CX,
+        Register::DX,
+        Register::BX,
+        Register::SP,
+        Register::BP,
+        Register::SI,
+        Register::DI,
+    ],
+];
 
 /// Represents a memory address calculation.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum MemoryAddress {
-    R(Register16),
-    RD8(Register16, u8),
-    RD16(Register16, u16),
-    RR(Register16, Register16),
-    RRD8(Register16, Register16, u8),
-    RRD16(Register16, Register16, u16),
+    R(Register),
+    RD8(Register, u8),
+    RD16(Register, u16),
+    RR(Register, Register),
+    RRD8(Register, Register, u8),
+    RRD16(Register, Register, u16),
     DA(u16),
 }
 
@@ -128,8 +152,7 @@ impl fmt::Display for MemoryAddress {
 /// Represents an operand for an instruction.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum Operand {
-    R8(Register8),
-    R16(Register16),
+    R(Register),
     MA(MemoryAddress),
     IMM8(u8),
     IMM16(u16),
@@ -138,8 +161,7 @@ pub enum Operand {
 impl fmt::Display for Operand {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::R8(reg) => write!(f, "{}", reg),
-            Self::R16(reg) => write!(f, "{}", reg),
+            Self::R(reg) => write!(f, "{}", reg),
             Self::MA(addr) => write!(f, "{}", addr),
             Self::IMM8(val) => write!(f, "byte {}", val),
             Self::IMM16(val) => write!(f, "word {}", val),
@@ -147,57 +169,81 @@ impl fmt::Display for Operand {
     }
 }
 
-/// Represents a jump condition.
-#[derive(Debug, PartialEq, Eq, Copy, Clone, Display, TryFromPrimitive)]
-#[repr(u8)]
+/// Represents the condition for a conditional jump instruction.
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Display)]
 pub enum JumpCondition {
     #[strum(serialize = "jo")]
-    JO = 0x0,
+    JO,
     #[strum(serialize = "jno")]
-    JNO = 0x1,
+    JNO,
     #[strum(serialize = "jb")]
-    JB = 0x2,
+    JB,
     #[strum(serialize = "jnb")]
-    JNB = 0x3,
+    JNB,
     #[strum(serialize = "jz")]
-    JZ = 0x4,
+    JZ,
     #[strum(serialize = "jnz")]
-    JNZ = 0x5,
+    JNZ,
     #[strum(serialize = "jbe")]
-    JBE = 0x6,
+    JBE,
     #[strum(serialize = "ja")]
-    JA = 0x7,
+    JA,
     #[strum(serialize = "js")]
-    JS = 0x8,
+    JS,
     #[strum(serialize = "jns")]
-    JNS = 0x9,
+    JNS,
     #[strum(serialize = "jp")]
-    JP = 0xA,
+    JP,
     #[strum(serialize = "jnp")]
-    JNP = 0xB,
+    JNP,
     #[strum(serialize = "jl")]
-    JL = 0xC,
+    JL,
     #[strum(serialize = "jge")]
-    JGE = 0xD,
+    JGE,
     #[strum(serialize = "jle")]
-    JLE = 0xE,
+    JLE,
     #[strum(serialize = "jg")]
-    JG = 0xF,
+    JG,
 }
 
-/// Represents the type of a LOOP or JCXZ instruction.
-#[derive(Debug, PartialEq, Eq, Copy, Clone, Display, TryFromPrimitive)]
-#[repr(u8)]
+const JUMP_CONDITIONS: [JumpCondition; 16] = [
+    JumpCondition::JO,
+    JumpCondition::JNO,
+    JumpCondition::JB,
+    JumpCondition::JNB,
+    JumpCondition::JZ,
+    JumpCondition::JNZ,
+    JumpCondition::JBE,
+    JumpCondition::JA,
+    JumpCondition::JS,
+    JumpCondition::JNS,
+    JumpCondition::JP,
+    JumpCondition::JNP,
+    JumpCondition::JL,
+    JumpCondition::JGE,
+    JumpCondition::JLE,
+    JumpCondition::JG,
+];
+
+/// Represents the condition for a loop instruction.
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Display)]
 pub enum LoopCondition {
     #[strum(serialize = "loopnz")]
-    LOOPNZ = 0xE0,
+    LOOPNZ,
     #[strum(serialize = "loopz")]
-    LOOPZ = 0xE1,
+    LOOPZ,
     #[strum(serialize = "loop")]
-    LOOP = 0xE2,
+    LOOP,
     #[strum(serialize = "jcxz")]
-    JCXZ = 0xE3,
+    JCXZ,
 }
+
+const LOOP_CONDITIONS: [LoopCondition; 4] = [
+    LoopCondition::LOOPNZ,
+    LoopCondition::LOOPZ,
+    LoopCondition::LOOP,
+    LoopCondition::JCXZ,
+];
 
 /// Represents a binary arithmetic or move operation.
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Display)]
@@ -334,14 +380,22 @@ impl<'a> Decoder<'a> {
 
     /// Decodes a LOOP, LOOPZ, LOOPNZ, or JCXZ instruction.
     fn decode_loop(&mut self, opcode: u8) -> Instruction {
-        let cond = LoopCondition::try_from(opcode).expect("Invalid loop condition encoding");
+        // Look up the LoopCondition from the LOOP_CONDITIONS array
+        let cond_index = (opcode - 0xE0) as usize;
+        let cond = *LOOP_CONDITIONS
+            .get(cond_index)
+            .expect("Invalid loop condition opcode");
         let disp = self.read_u8() as i8;
         Instruction::LOOP(cond, disp)
     }
 
     /// Decodes a conditional jump instruction.
     fn decode_jump(&mut self, opcode: u8) -> Instruction {
-        let cond = JumpCondition::try_from(opcode & 0x0F).expect("Invalid jump condition encoding");
+        // Look up the JumpCondition from the JUMP_CONDITIONS array
+        let cond_index = (opcode & 0x0F) as usize;
+        let cond = *JUMP_CONDITIONS
+            .get(cond_index)
+            .expect("Invalid jump condition opcode");
         let disp = self.read_u8() as i8;
         Instruction::JMP(cond, disp)
     }
@@ -350,19 +404,15 @@ impl<'a> Decoder<'a> {
         let op = BinaryOp::arithmetic_op_from_encoding((opcode >> 3) & 0b111);
         let d = (opcode & 0b10) != 0;
         let w = (opcode & 0b1) != 0;
-        let mod_rm_byte = self.read_u8();
-        let reg_op = if w {
-            let reg_encoding = (mod_rm_byte >> 3) & 0b111;
-            let reg = Register16::try_from(reg_encoding).expect("Invalid 16-bit reg encoding");
-            Operand::R16(reg)
-        } else {
-            let reg_encoding = (mod_rm_byte >> 3) & 0b111;
-            let reg = Register8::try_from(reg_encoding).expect("Invalid 8-bit reg encoding");
-            Operand::R8(reg)
-        };
-        let rm_op = self.decode_rm_operand(mod_rm_byte, w);
-        let (dest, src) = if d { (reg_op, rm_op) } else { (rm_op, reg_op) };
+        let (dest, src) = self.decode_reg_and_rm_operands(d, w);
         Instruction::BO(op, dest, src)
+    }
+
+    fn decode_mov_reg_mem(&mut self, opcode: u8) -> Instruction {
+        let d = (opcode & 0b10) != 0;
+        let w = (opcode & 0b1) != 0;
+        let (dest, src) = self.decode_reg_and_rm_operands(d, w);
+        Instruction::BO(BinaryOp::MOV, dest, src)
     }
 
     fn decode_arithmetic_imm_to_rm(&mut self, opcode: u8) -> Instruction {
@@ -385,11 +435,13 @@ impl<'a> Decoder<'a> {
     fn decode_arithmetic_imm_to_acc(&mut self, opcode: u8) -> Instruction {
         let op = BinaryOp::arithmetic_op_from_encoding((opcode >> 3) & 0b111);
         let w = (opcode & 0b1) != 0;
-        let dest = if w {
-            Operand::R16(Register16::AX)
-        } else {
-            Operand::R8(Register8::AL)
-        };
+        // The accumulator registers (AL, AX) are always at index 0
+        let dest_reg = REGISTERS
+            .get(w as usize)
+            .expect("Invalid W bit for accumulator register")
+            .get(0)
+            .expect("Missing accumulator register");
+        let dest = Operand::R(*dest_reg);
         let src = if w {
             Operand::IMM16(self.read_u16_le())
         } else {
@@ -398,33 +450,15 @@ impl<'a> Decoder<'a> {
         Instruction::BO(op, dest, src)
     }
 
-    fn decode_mov_reg_mem(&mut self, opcode: u8) -> Instruction {
-        let d = (opcode & 0b10) != 0;
-        let w = (opcode & 0b1) != 0;
-        let mod_rm_byte = self.read_u8();
-        let reg_op = if w {
-            let reg_encoding = (mod_rm_byte >> 3) & 0b111;
-            let reg = Register16::try_from(reg_encoding).expect("Invalid 16-bit reg encoding");
-            Operand::R16(reg)
-        } else {
-            let reg_encoding = (mod_rm_byte >> 3) & 0b111;
-            let reg = Register8::try_from(reg_encoding).expect("Invalid 8-bit reg encoding");
-            Operand::R8(reg)
-        };
-        let rm_op = self.decode_rm_operand(mod_rm_byte, w);
-        let (dest, src) = if d { (reg_op, rm_op) } else { (rm_op, reg_op) };
-        Instruction::BO(BinaryOp::MOV, dest, src)
-    }
-
     fn decode_mov_imm_to_reg(&mut self, opcode: u8) -> Instruction {
         let w = (opcode & 0b1000) != 0;
-        let dest = if w {
-            let reg = Register16::try_from(opcode & 0b111).expect("Invalid 16-bit reg encoding");
-            Operand::R16(reg)
-        } else {
-            let reg = Register8::try_from(opcode & 0b111).expect("Invalid 8-bit reg encoding");
-            Operand::R8(reg)
-        };
+        let reg_encoding = (opcode & 0b111) as usize;
+        let dest_reg = REGISTERS
+            .get(w as usize)
+            .expect("Invalid W bit")
+            .get(reg_encoding)
+            .expect("Invalid REG encoding");
+        let dest = Operand::R(*dest_reg);
         let src = if w {
             Operand::IMM16(self.read_u16_le())
         } else {
@@ -448,11 +482,12 @@ impl<'a> Decoder<'a> {
     fn decode_mov_mem_accumulator(&mut self, opcode: u8) -> Instruction {
         let d = (opcode & 0b10) == 0;
         let w = (opcode & 0b1) != 0;
-        let acc_op = if w {
-            Operand::R16(Register16::AX)
-        } else {
-            Operand::R8(Register8::AL)
-        };
+        let acc_reg = REGISTERS
+            .get(w as usize)
+            .expect("Invalid W bit for accumulator register")
+            .get(0)
+            .expect("Missing accumulator register");
+        let acc_op = Operand::R(*acc_reg);
         let mem_op = Operand::MA(MemoryAddress::DA(self.read_u16_le()));
         let (dest, src) = if d {
             (acc_op, mem_op)
@@ -462,29 +497,49 @@ impl<'a> Decoder<'a> {
         Instruction::BO(BinaryOp::MOV, dest, src)
     }
 
+    /// Decodes a ModR/M byte to get a register and a register/memory operand.
+    /// Returns a tuple of (destination, source) based on the d flag.
+    fn decode_reg_and_rm_operands(&mut self, d: bool, w: bool) -> (Operand, Operand) {
+        let mod_rm_byte = self.read_u8();
+        let reg_encoding = (mod_rm_byte >> 3) & 0b111;
+        let reg_op = Operand::R(
+            *REGISTERS
+                .get(w as usize)
+                .expect("Invalid W bit")
+                .get(reg_encoding as usize)
+                .expect("Invalid REG encoding"),
+        );
+        let rm_op = self.decode_rm_operand(mod_rm_byte, w);
+
+        if d {
+            (reg_op, rm_op)
+        } else {
+            (rm_op, reg_op)
+        }
+    }
+
     /// Decodes a ModR/M byte to get an operand. Handles register or memory addressing.
     fn decode_rm_operand(&mut self, mod_rm_byte: u8, w: bool) -> Operand {
         let md = mod_rm_byte >> 6;
-        let rm = mod_rm_byte & 0b111;
+        let rm = (mod_rm_byte & 0b111) as usize;
         if md == 0b11 {
-            return if w {
-                let reg = Register16::try_from(rm).expect("Invalid 16-bit reg encoding");
-                Operand::R16(reg)
-            } else {
-                let reg = Register8::try_from(rm).expect("Invalid 8-bit reg encoding");
-                Operand::R8(reg)
-            };
+            let reg = REGISTERS
+                .get(w as usize)
+                .expect("Invalid W bit")
+                .get(rm)
+                .expect("Invalid R/M encoding for register");
+            return Operand::R(*reg);
         }
         let addr = match md {
             0b00 => {
                 if rm == 0b110 {
                     MemoryAddress::DA(self.read_u16_le())
                 } else {
-                    Self::effective_address_no_disp(rm)
+                    Self::decode_effective_address_no_disp(rm as u8)
                 }
             }
-            0b01 => Self::effective_address_disp8(rm, self.read_u8()),
-            0b10 => Self::effective_address_disp16(rm, self.read_u16_le()),
+            0b01 => Self::decode_effective_address_disp8(rm as u8, self.read_u8()),
+            0b10 => Self::decode_effective_address_disp16(rm as u8, self.read_u16_le()),
             _ => unreachable!(),
         };
         Operand::MA(addr)
@@ -492,43 +547,43 @@ impl<'a> Decoder<'a> {
 
     // --- Static Helpers for Memory Address Calculation ---
 
-    fn effective_address_no_disp(rm: u8) -> MemoryAddress {
+    fn decode_effective_address_no_disp(rm: u8) -> MemoryAddress {
         match rm {
-            0b000 => MemoryAddress::RR(Register16::BX, Register16::SI),
-            0b001 => MemoryAddress::RR(Register16::BX, Register16::DI),
-            0b010 => MemoryAddress::RR(Register16::BP, Register16::SI),
-            0b011 => MemoryAddress::RR(Register16::BP, Register16::DI),
-            0b100 => MemoryAddress::R(Register16::SI),
-            0b101 => MemoryAddress::R(Register16::DI),
-            0b111 => MemoryAddress::R(Register16::BX),
+            0b000 => MemoryAddress::RR(REGISTERS[1][3], REGISTERS[1][6]),
+            0b001 => MemoryAddress::RR(REGISTERS[1][3], REGISTERS[1][7]),
+            0b010 => MemoryAddress::RR(REGISTERS[1][5], REGISTERS[1][6]),
+            0b011 => MemoryAddress::RR(REGISTERS[1][5], REGISTERS[1][7]),
+            0b100 => MemoryAddress::R(REGISTERS[1][6]),
+            0b101 => MemoryAddress::R(REGISTERS[1][7]),
+            0b111 => MemoryAddress::R(REGISTERS[1][3]),
             _ => panic!("Invalid R/M encoding for MOD=00: {}", rm),
         }
     }
 
-    fn effective_address_disp8(rm: u8, disp: u8) -> MemoryAddress {
+    fn decode_effective_address_disp8(rm: u8, disp: u8) -> MemoryAddress {
         match rm {
-            0b000 => MemoryAddress::RRD8(Register16::BX, Register16::SI, disp),
-            0b001 => MemoryAddress::RRD8(Register16::BX, Register16::DI, disp),
-            0b010 => MemoryAddress::RRD8(Register16::BP, Register16::SI, disp),
-            0b011 => MemoryAddress::RRD8(Register16::BP, Register16::DI, disp),
-            0b100 => MemoryAddress::RD8(Register16::SI, disp),
-            0b101 => MemoryAddress::RD8(Register16::DI, disp),
-            0b110 => MemoryAddress::RD8(Register16::BP, disp),
-            0b111 => MemoryAddress::RD8(Register16::BX, disp),
+            0b000 => MemoryAddress::RRD8(REGISTERS[1][3], REGISTERS[1][6], disp),
+            0b001 => MemoryAddress::RRD8(REGISTERS[1][3], REGISTERS[1][7], disp),
+            0b010 => MemoryAddress::RRD8(REGISTERS[1][5], REGISTERS[1][6], disp),
+            0b011 => MemoryAddress::RRD8(REGISTERS[1][5], REGISTERS[1][7], disp),
+            0b100 => MemoryAddress::RD8(REGISTERS[1][6], disp),
+            0b101 => MemoryAddress::RD8(REGISTERS[1][7], disp),
+            0b110 => MemoryAddress::RD8(REGISTERS[1][5], disp),
+            0b111 => MemoryAddress::RD8(REGISTERS[1][3], disp),
             _ => unreachable!(),
         }
     }
 
-    fn effective_address_disp16(rm: u8, disp: u16) -> MemoryAddress {
+    fn decode_effective_address_disp16(rm: u8, disp: u16) -> MemoryAddress {
         match rm {
-            0b000 => MemoryAddress::RRD16(Register16::BX, Register16::SI, disp),
-            0b001 => MemoryAddress::RRD16(Register16::BX, Register16::DI, disp),
-            0b010 => MemoryAddress::RRD16(Register16::BP, Register16::SI, disp),
-            0b011 => MemoryAddress::RRD16(Register16::BP, Register16::DI, disp),
-            0b100 => MemoryAddress::RD16(Register16::SI, disp),
-            0b101 => MemoryAddress::RD16(Register16::DI, disp),
-            0b110 => MemoryAddress::RD16(Register16::BP, disp),
-            0b111 => MemoryAddress::RD16(Register16::BX, disp),
+            0b000 => MemoryAddress::RRD16(REGISTERS[1][3], REGISTERS[1][6], disp),
+            0b001 => MemoryAddress::RRD16(REGISTERS[1][3], REGISTERS[1][7], disp),
+            0b010 => MemoryAddress::RRD16(REGISTERS[1][5], REGISTERS[1][6], disp),
+            0b011 => MemoryAddress::RRD16(REGISTERS[1][5], REGISTERS[1][7], disp),
+            0b100 => MemoryAddress::RD16(REGISTERS[1][6], disp),
+            0b101 => MemoryAddress::RD16(REGISTERS[1][7], disp),
+            0b110 => MemoryAddress::RD16(REGISTERS[1][5], disp),
+            0b111 => MemoryAddress::RRD16(REGISTERS[1][3], REGISTERS[1][7], disp),
             _ => unreachable!(),
         }
     }
