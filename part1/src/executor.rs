@@ -1,5 +1,7 @@
 use crate::decoder::Decoder;
-use crate::instruction::{BinaryOp, Instruction, JumpCondition, LoopCondition, Operand, Register};
+use crate::instruction::{
+    BinaryOp, Instruction, JumpCondition, LoopCondition, MemoryAddress, Operand, Register,
+};
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 
@@ -45,19 +47,24 @@ impl fmt::Display for Flags {
     }
 }
 
-pub struct Executor {
+pub struct Executor<'a> {
     instructions: HashMap<usize, Instruction>,
-    bytes: Vec<u8>,
+    bytes: &'a [u8],
+    memory: [u8; 1024 * 1024],
     register_rows: [RegisterRow; 8],
     flags: Flags,
     ip: usize,
 }
 
-impl Executor {
-    pub fn new(decoded_instructions: HashMap<usize, Instruction>, original_bytes: Vec<u8>) -> Self {
+impl<'a> Executor<'a> {
+    pub fn new(
+        decoded_instructions: HashMap<usize, Instruction>,
+        original_bytes: &'a [u8],
+    ) -> Self {
         Self {
             instructions: decoded_instructions,
             bytes: original_bytes,
+            memory: [0; 1024 * 1024],
             register_rows: [RegisterRow { low: 0, high: 0 }; 8],
             flags: Flags {
                 parity: false,
@@ -110,7 +117,7 @@ impl Executor {
         let f = |r: Register| {
             let val = self.get_16bit_register_value(r);
             if val != 0 {
-                println!("      {}: 0x{:04x} ({})", r, val, val);
+                println!("     {}: 0x{:04x} ({})", r, val, val);
             }
         };
         f(Register::Ax);
@@ -121,8 +128,8 @@ impl Executor {
         f(Register::Bp);
         f(Register::Si);
         f(Register::Di);
-        println!("      ip: 0x{:04x} ({})", self.ip, self.ip);
-        println!("   flags: {}\n", self.flags);
+        println!("     ip: 0x{:04x} ({})", self.ip, self.ip);
+        println!("  flags: {}\n", self.flags);
     }
 
     fn get_instruction_length(&self, byte_offset: usize) -> usize {
@@ -173,9 +180,12 @@ impl Executor {
 
     fn get_operand_values_for_log(&self, instruction: &Instruction) -> Vec<(Operand, u16)> {
         let mut values = Vec::new();
+        // This function logs the state of the destination operand.
+        // It's assumed to be a binary op with a destination.
         if let Instruction::Bo(_, dest, _) = instruction {
             if let Operand::R(reg) = dest {
-                values.push((*dest, self.get_register_display_value(*reg)));
+                let (w, _) = reg.get_index();
+                values.push((*dest, self.get_operand_value(*dest, w)));
             }
         }
         values
@@ -199,6 +209,12 @@ impl Executor {
         (row.high as u16) << 8 | (row.low as u16)
     }
 
+    fn set_16bit_register_value(&mut self, reg: Register, val: u16) {
+        let row = self.get_register_row(reg);
+        row.low = val as u8;
+        row.high = (val >> 8) as u8;
+    }
+
     fn get_8bit_register_value(&self, reg: Register) -> u8 {
         let (w, i) = reg.get_index();
         if w == 1 {
@@ -219,13 +235,14 @@ impl Executor {
         }
     }
 
-    fn get_register_display_value(&self, reg: Register) -> u16 {
-        let (w, _i) = reg.get_index();
-        if w == 1 {
-            self.get_16bit_register_value(reg)
-        } else {
-            self.get_8bit_register_value(reg) as u16
-        }
+    fn set_8bit_register_low_value(&mut self, reg: Register, val: u8) {
+        let row = self.get_register_row(reg);
+        row.low = val;
+    }
+
+    fn set_8bit_register_high_value(&mut self, reg: Register, val: u8) {
+        let row = self.get_register_row(reg);
+        row.high = val;
     }
 
     fn execute_instruction(&mut self, instruction: &Instruction) {
@@ -266,21 +283,46 @@ impl Executor {
     }
 
     fn execute_bo_instruction(&mut self, op: BinaryOp, arg1: Operand, arg2: Operand) {
+        // We determine the width of the operation from the destination operand (arg1).
+        let width = match arg1 {
+            Operand::R(reg) => reg.get_index().0,
+            Operand::Ma(_) => {
+                // If the destination is memory, we assume the width is determined by the source operand (arg2)
+                match arg2 {
+                    Operand::R(reg) => reg.get_index().0,
+                    Operand::Imm8(_) => 0,
+                    Operand::Imm16(_) => 1,
+                    _ => panic!("Fatal error: Cannot infer operand width from {:?}", arg2),
+                }
+            }
+            _ => panic!(
+                "Fatal error: Invalid destination operand for binary op {:?}",
+                arg1
+            ),
+        };
+
         match op {
-            BinaryOp::Mov => self.execute_mov_instruction(arg1, arg2),
+            BinaryOp::Mov => self.execute_mov_instruction(arg1, arg2, width),
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Cmp => {
-                self.execute_arithmetic_instruction(op, arg1, arg2)
+                self.execute_arithmetic_instruction(op, arg1, arg2, width)
             }
         }
     }
 
-    fn execute_mov_instruction(&mut self, arg1: Operand, arg2: Operand) {
-        self.set_value(arg1, arg2);
+    fn execute_mov_instruction(&mut self, dest: Operand, src: Operand, width: u8) {
+        let val = self.get_operand_value(src, width);
+        self.set_operand_value(dest, val, width);
     }
 
-    fn execute_arithmetic_instruction(&mut self, op: BinaryOp, arg1: Operand, arg2: Operand) {
-        let val1 = self.get_operand_value(arg1);
-        let val2 = self.get_operand_value(arg2);
+    fn execute_arithmetic_instruction(
+        &mut self,
+        op: BinaryOp,
+        arg1: Operand,
+        arg2: Operand,
+        width: u8,
+    ) {
+        let val1 = self.get_operand_value(arg1, width);
+        let val2 = self.get_operand_value(arg2, width);
 
         let result: i16;
         let carry_flag_val: bool;
@@ -313,7 +355,7 @@ impl Executor {
         self.update_parity_flag(result);
 
         if op == BinaryOp::Add || op == BinaryOp::Sub {
-            self.set_value(arg1, Operand::Imm16(result as u16));
+            self.set_operand_value(arg1, result as u16, width);
         }
     }
 
@@ -330,63 +372,86 @@ impl Executor {
         self.flags.sign = val < 0;
     }
 
-    fn get_operand_value(&self, arg: Operand) -> u16 {
+    // Retrieves the value from an operand, respecting the specified width (0 for 8-bit, 1 for 16-bit).
+    fn get_operand_value(&self, arg: Operand, width: u8) -> u16 {
         match arg {
             Operand::Imm8(val) => val as u16,
             Operand::Imm16(val) => val,
             Operand::R(reg) => {
-                let (w, i) = reg.get_index();
+                // The get_register_value function already handles the width
+                let (w, _) = reg.get_index();
                 if w == 1 {
-                    let row = self
-                        .register_rows
-                        .get(i as usize)
-                        .expect("Fatal error: Invalid register index for 16-bit register access.");
-                    (row.low as u16) | ((row.high as u16) << 8)
+                    self.get_16bit_register_value(reg)
                 } else {
-                    let high = (i >> 2) != 0;
-                    let idx = i & 0b11;
-                    let row = self
-                        .register_rows
-                        .get(idx as usize)
-                        .expect("Fatal error: Invalid register index for 8-bit register access.");
-                    if high {
-                        row.high as u16
-                    } else {
-                        row.low as u16
-                    }
+                    self.get_8bit_register_value(reg) as u16
                 }
             }
-            _ => panic!("Fatal error: Memory addressing mode not yet supported."),
-        }
-    }
-
-    fn set_value(&mut self, arg1: Operand, arg2: Operand) {
-        let val = self.get_operand_value(arg2);
-        if let Operand::R(reg) = arg1 {
-            let (w, i) = reg.get_index();
-            if w == 1 {
-                self.set_16bit_register_value(reg, val);
-            } else if i < 4 {
-                self.set_8bit_register_low_value(reg, val as u8);
-            } else {
-                self.set_8bit_register_high_value(reg, val as u8);
+            Operand::Ma(addr) => {
+                let index = self.get_memory_index(addr);
+                let mem_slice = self
+                    .memory
+                    .get(index..)
+                    .expect("Memory access out of bounds");
+                if width == 0 {
+                    mem_slice[0] as u16
+                } else {
+                    (mem_slice[1] as u16) << 8 | (mem_slice[0] as u16)
+                }
             }
         }
     }
 
-    fn set_16bit_register_value(&mut self, reg: Register, val: u16) {
-        let row = self.get_register_row(reg);
-        row.low = val as u8;
-        row.high = (val >> 8) as u8;
+    fn get_memory_index(&self, addr: MemoryAddress) -> usize {
+        (match addr {
+            MemoryAddress::Rd8(reg, disp) => self.get_16bit_register_value(reg) + (disp as u16),
+            MemoryAddress::Rd16(reg, disp) => self.get_16bit_register_value(reg) + disp,
+            MemoryAddress::Rr(reg1, reg2) => {
+                self.get_16bit_register_value(reg1) + self.get_16bit_register_value(reg2)
+            }
+            MemoryAddress::Rrd8(reg1, reg2, disp) => {
+                self.get_16bit_register_value(reg1)
+                    + self.get_16bit_register_value(reg2)
+                    + (disp as u16)
+            }
+            MemoryAddress::Rrd16(reg1, reg2, disp) => {
+                self.get_16bit_register_value(reg1) + self.get_16bit_register_value(reg2) + disp
+            }
+            MemoryAddress::Da(addr) => addr,
+            MemoryAddress::R(reg) => self.get_16bit_register_value(reg),
+        }) as usize
     }
 
-    fn set_8bit_register_low_value(&mut self, reg: Register, val: u8) {
-        let row = self.get_register_row(reg);
-        row.low = val;
-    }
-
-    fn set_8bit_register_high_value(&mut self, reg: Register, val: u8) {
-        let row = self.get_register_row(reg);
-        row.high = val;
+    // A helper function that writes a value to an operand, respecting the width (0 for 8-bit, 1 for 16-bit).
+    fn set_operand_value(&mut self, arg: Operand, val: u16, width: u8) {
+        match arg {
+            Operand::R(reg) => {
+                let (w, i) = reg.get_index();
+                if w == 1 {
+                    self.set_16bit_register_value(reg, val);
+                } else if i < 4 {
+                    self.set_8bit_register_low_value(reg, val as u8);
+                } else {
+                    self.set_8bit_register_high_value(reg, val as u8);
+                }
+            }
+            Operand::Ma(addr) => {
+                let index = self.get_memory_index(addr);
+                if width == 0 {
+                    let mem_byte = self
+                        .memory
+                        .get_mut(index)
+                        .expect("Memory access out of bounds");
+                    *mem_byte = val as u8;
+                } else {
+                    let mem_slice = self
+                        .memory
+                        .get_mut(index..index + 2)
+                        .expect("Memory access out of bounds");
+                    mem_slice[0] = val as u8;
+                    mem_slice[1] = (val >> 8) as u8;
+                }
+            }
+            _ => panic!("Fatal error: Invalid destination operand for set_operand_value."),
+        }
     }
 }

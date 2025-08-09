@@ -31,7 +31,7 @@ fn main() {
     write_decoding(&decoded_instructions, output_file)
         .expect("Failed to write decoded instructions");
 
-    let mut executor = Executor::new(decoded_instructions, original_bytes);
+    let mut executor = Executor::new(decoded_instructions, &original_bytes);
     executor.run();
 
     println!("Simulation complete!");
