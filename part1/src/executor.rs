@@ -1,0 +1,392 @@
+use crate::decoder::Decoder;
+use crate::instruction::{BinaryOp, Instruction, JumpCondition, LoopCondition, Operand, Register};
+use std::collections::HashMap;
+use std::fmt::{self, Display, Formatter};
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+struct RegisterRow {
+    low: u8,
+    high: u8,
+}
+
+impl Display for RegisterRow {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "{:02x} {:02x}", self.high, self.low)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+struct Flags {
+    parity: bool,
+    zero: bool,
+    sign: bool,
+    carry: bool,
+    auxiliary_carry: bool,
+}
+
+impl fmt::Display for Flags {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.parity {
+            write!(f, "P")?;
+        }
+        if self.zero {
+            write!(f, "Z")?;
+        }
+        if self.sign {
+            write!(f, "S")?;
+        }
+        if self.carry {
+            write!(f, "C")?;
+        }
+        if self.auxiliary_carry {
+            write!(f, "A")?;
+        }
+        Ok(())
+    }
+}
+
+pub struct Executor {
+    instructions: HashMap<usize, Instruction>,
+    bytes: Vec<u8>,
+    register_rows: [RegisterRow; 8],
+    flags: Flags,
+    ip: usize,
+}
+
+impl Executor {
+    pub fn new(decoded_instructions: HashMap<usize, Instruction>, original_bytes: Vec<u8>) -> Self {
+        Self {
+            instructions: decoded_instructions,
+            bytes: original_bytes,
+            register_rows: [RegisterRow { low: 0, high: 0 }; 8],
+            flags: Flags {
+                parity: false,
+                zero: false,
+                sign: false,
+                carry: false,
+                auxiliary_carry: false,
+            },
+            ip: 0,
+        }
+    }
+
+    pub fn run(&mut self) {
+        println!("\nStart of execution log:");
+        println!("------------------------");
+        while self.ip < self.bytes.len() {
+            let instruction = *self.instructions
+                .get(&self.ip)
+                .expect("Fatal error: No instruction found at current IP. This may indicate an invalid jump target.");
+
+            let start_ip = self.ip;
+            let start_flags = self.flags;
+
+            let instruction_length = self.get_instruction_length(start_ip);
+
+            let initial_state = self.get_operand_values_for_log(&instruction);
+            self.execute_instruction(&instruction);
+            let final_state = self.get_operand_values_for_log(&instruction);
+
+            if self.ip == start_ip {
+                self.ip += instruction_length;
+            }
+
+            let end_ip = self.ip;
+            let end_flags = self.flags;
+
+            self.log_instruction_execution(
+                &instruction,
+                start_ip,
+                end_ip,
+                initial_state,
+                final_state,
+                start_flags,
+                end_flags,
+            );
+        }
+        println!("------------------------");
+
+        println!("\nFinal registers:");
+        let f = |r: Register| {
+            let val = self.get_16bit_register_value(r);
+            if val != 0 {
+                println!("      {}: 0x{:04x} ({})", r, val, val);
+            }
+        };
+        f(Register::Ax);
+        f(Register::Cx);
+        f(Register::Dx);
+        f(Register::Bx);
+        f(Register::Sp);
+        f(Register::Bp);
+        f(Register::Si);
+        f(Register::Di);
+        println!("      ip: 0x{:04x} ({})", self.ip, self.ip);
+        println!("   flags: {}\n", self.flags);
+    }
+
+    fn get_instruction_length(&self, byte_offset: usize) -> usize {
+        let mut temp_decoder = Decoder::new(&self.bytes[byte_offset..]);
+        temp_decoder.decode_next_instruction();
+        temp_decoder.pos
+    }
+
+    fn log_instruction_execution(
+        &self,
+        instruction: &Instruction,
+        start_ip: usize,
+        end_ip: usize,
+        initial_state: Vec<(Operand, u16)>,
+        final_state: Vec<(Operand, u16)>,
+        start_flags: Flags,
+        end_flags: Flags,
+    ) {
+        let mut log_line = format!("{}", instruction);
+        let mut state_changes = Vec::new();
+
+        for i in 0..initial_state.len() {
+            let (op, initial_val) = &initial_state[i];
+            let (_, final_val) = &final_state[i];
+            if initial_val != final_val {
+                if let Operand::R(reg) = op {
+                    state_changes.push(format!("{}:0x{:x}->0x{:x}", reg, initial_val, final_val));
+                }
+            }
+        }
+
+        if start_ip != end_ip {
+            state_changes.push(format!("ip:0x{:x}->0x{:x}", start_ip, end_ip));
+        }
+
+        if start_flags != end_flags {
+            let start_flags_str = format!("{}", start_flags);
+            let end_flags_str = format!("{}", end_flags);
+            state_changes.push(format!("flags:{}->{}", start_flags_str, end_flags_str));
+        }
+
+        if !state_changes.is_empty() {
+            log_line.push_str(&format!(" ; {}", state_changes.join(" ")));
+        }
+
+        println!("{}", log_line);
+    }
+
+    fn get_operand_values_for_log(&self, instruction: &Instruction) -> Vec<(Operand, u16)> {
+        let mut values = Vec::new();
+        if let Instruction::Bo(_, dest, _) = instruction {
+            if let Operand::R(reg) = dest {
+                values.push((*dest, self.get_register_display_value(*reg)));
+            }
+        }
+        values
+    }
+
+    fn get_register_row(&mut self, reg: Register) -> &mut RegisterRow {
+        let (_w, i) = reg.get_index();
+        let idx = i as usize;
+        self.register_rows
+            .get_mut(idx)
+            .expect("Fatal error: Attempted to get register row with invalid index.")
+    }
+
+    fn get_16bit_register_value(&self, reg: Register) -> u16 {
+        let (_w, i) = reg.get_index();
+        let idx = i as usize;
+        let row = self
+            .register_rows
+            .get(idx)
+            .expect("Fatal error: Invalid register index for 16-bit register access.");
+        (row.high as u16) << 8 | (row.low as u16)
+    }
+
+    fn get_8bit_register_value(&self, reg: Register) -> u8 {
+        let (w, i) = reg.get_index();
+        if w == 1 {
+            panic!(
+                "Fatal error: Attempted to get 8-bit value from a 16-bit register: {}",
+                reg
+            );
+        }
+        let idx = i & 0b11;
+        let row = self
+            .register_rows
+            .get(idx as usize)
+            .expect("Fatal error: Invalid register index for 8-bit register access.");
+        if (i >> 2) != 0 {
+            row.high
+        } else {
+            row.low
+        }
+    }
+
+    fn get_register_display_value(&self, reg: Register) -> u16 {
+        let (w, _i) = reg.get_index();
+        if w == 1 {
+            self.get_16bit_register_value(reg)
+        } else {
+            self.get_8bit_register_value(reg) as u16
+        }
+    }
+
+    fn execute_instruction(&mut self, instruction: &Instruction) {
+        match instruction {
+            Instruction::Bo(op, arg1, arg2) => self.execute_bo_instruction(*op, *arg1, *arg2),
+            Instruction::Jmp(op, arg) => self.execute_jump_instruction(*op, *arg),
+            Instruction::Loop(op, arg) => self.execute_loop_instruction(*op, *arg),
+        }
+    }
+
+    fn execute_loop_instruction(&mut self, op: LoopCondition, arg: i8) {
+        let cx_val = self.get_16bit_register_value(Register::Cx);
+        let new_cx_val = cx_val - 1;
+        self.set_16bit_register_value(Register::Cx, new_cx_val);
+
+        let should_loop = match op {
+            LoopCondition::Loop => new_cx_val != 0,
+            _ => panic!("Loop condition {:?} not supported", op),
+        };
+
+        if should_loop {
+            let displacement = arg as isize;
+            self.ip = (self.ip as isize + 2 + displacement) as usize;
+        }
+    }
+
+    fn execute_jump_instruction(&mut self, op: JumpCondition, arg: i8) {
+        let should_jump = match op {
+            JumpCondition::Jz => self.flags.zero,
+            JumpCondition::Jnz => !self.flags.zero,
+            _ => panic!("Jump condition {:?} not supported", op),
+        };
+
+        if should_jump {
+            let displacement = arg as isize;
+            self.ip = (self.ip as isize + 2 + displacement) as usize;
+        }
+    }
+
+    fn execute_bo_instruction(&mut self, op: BinaryOp, arg1: Operand, arg2: Operand) {
+        match op {
+            BinaryOp::Mov => self.execute_mov_instruction(arg1, arg2),
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Cmp => {
+                self.execute_arithmetic_instruction(op, arg1, arg2)
+            }
+        }
+    }
+
+    fn execute_mov_instruction(&mut self, arg1: Operand, arg2: Operand) {
+        self.set_value(arg1, arg2);
+    }
+
+    fn execute_arithmetic_instruction(&mut self, op: BinaryOp, arg1: Operand, arg2: Operand) {
+        let val1 = self.get_operand_value(arg1);
+        let val2 = self.get_operand_value(arg2);
+
+        let result: i16;
+        let carry_flag_val: bool;
+        let auxiliary_carry_flag_val: bool;
+
+        match op {
+            BinaryOp::Add => {
+                let (res, overflow) = (val1 as i16).overflowing_add(val2 as i16);
+                carry_flag_val = overflow;
+                result = res;
+
+                let res_nibble = (val1 & 0xF) + (val2 & 0xF);
+                auxiliary_carry_flag_val = res_nibble > 0xF;
+            }
+            BinaryOp::Sub | BinaryOp::Cmp => {
+                let (res, overflow) = (val1 as i16).overflowing_sub(val2 as i16);
+                carry_flag_val = overflow;
+                result = res;
+
+                let res_nibble = (val1 & 0xF) as i16 - (val2 & 0xF) as i16;
+                auxiliary_carry_flag_val = res_nibble < 0;
+            }
+            _ => unreachable!(),
+        };
+
+        self.flags.carry = carry_flag_val;
+        self.flags.auxiliary_carry = auxiliary_carry_flag_val;
+        self.update_sign_flag(result);
+        self.update_zero_flag(result);
+        self.update_parity_flag(result);
+
+        if op == BinaryOp::Add || op == BinaryOp::Sub {
+            self.set_value(arg1, Operand::Imm16(result as u16));
+        }
+    }
+
+    fn update_parity_flag(&mut self, val: i16) {
+        let low_byte = (val as u8).count_ones();
+        self.flags.parity = low_byte % 2 == 0;
+    }
+
+    fn update_zero_flag(&mut self, val: i16) {
+        self.flags.zero = val == 0;
+    }
+
+    fn update_sign_flag(&mut self, val: i16) {
+        self.flags.sign = val < 0;
+    }
+
+    fn get_operand_value(&self, arg: Operand) -> u16 {
+        match arg {
+            Operand::Imm8(val) => val as u16,
+            Operand::Imm16(val) => val,
+            Operand::R(reg) => {
+                let (w, i) = reg.get_index();
+                if w == 1 {
+                    let row = self
+                        .register_rows
+                        .get(i as usize)
+                        .expect("Fatal error: Invalid register index for 16-bit register access.");
+                    (row.low as u16) | ((row.high as u16) << 8)
+                } else {
+                    let high = (i >> 2) != 0;
+                    let idx = i & 0b11;
+                    let row = self
+                        .register_rows
+                        .get(idx as usize)
+                        .expect("Fatal error: Invalid register index for 8-bit register access.");
+                    if high {
+                        row.high as u16
+                    } else {
+                        row.low as u16
+                    }
+                }
+            }
+            _ => panic!("Fatal error: Memory addressing mode not yet supported."),
+        }
+    }
+
+    fn set_value(&mut self, arg1: Operand, arg2: Operand) {
+        let val = self.get_operand_value(arg2);
+        if let Operand::R(reg) = arg1 {
+            let (w, i) = reg.get_index();
+            if w == 1 {
+                self.set_16bit_register_value(reg, val);
+            } else if i < 4 {
+                self.set_8bit_register_low_value(reg, val as u8);
+            } else {
+                self.set_8bit_register_high_value(reg, val as u8);
+            }
+        }
+    }
+
+    fn set_16bit_register_value(&mut self, reg: Register, val: u16) {
+        let row = self.get_register_row(reg);
+        row.low = val as u8;
+        row.high = (val >> 8) as u8;
+    }
+
+    fn set_8bit_register_low_value(&mut self, reg: Register, val: u8) {
+        let row = self.get_register_row(reg);
+        row.low = val;
+    }
+
+    fn set_8bit_register_high_value(&mut self, reg: Register, val: u8) {
+        let row = self.get_register_row(reg);
+        row.high = val;
+    }
+}
