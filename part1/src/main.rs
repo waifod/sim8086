@@ -1,9 +1,430 @@
 use std::env;
 use std::fmt;
+use std::fmt::Display;
+use std::fmt::Error;
+use std::fmt::Formatter;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use strum_macros::Display;
+
+pub fn execute(bytes: &[u8]) {
+    let mut executor = Executor::new(bytes);
+    println!("\nStart of execution log:");
+    println!("------------------------");
+    while !executor.is_eof() {
+        executor.execute_next_instruction();
+    }
+    println!("------------------------");
+
+    println!("\nFinal registers:");
+    println!(
+        "      bx: 0x{:04x} ({})",
+        executor.get_16bit_register_value(Register::BX),
+        executor.get_16bit_register_value(Register::BX)
+    );
+    println!(
+        "      cx: 0x{:04x} ({})",
+        executor.get_16bit_register_value(Register::CX),
+        executor.get_16bit_register_value(Register::CX)
+    );
+    println!("      ip: 0x{:04x} ({})", executor.ip, executor.ip);
+
+    // Print the final flags in a more readable format
+    print!("    flags:");
+    executor.flags.print_active();
+    println!();
+
+    println!("done");
+}
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+struct RegisterRow {
+    low: u8,
+    high: u8,
+}
+
+impl Display for RegisterRow {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        write!(f, "{:02x} {:02x}", self.high, self.low)
+    }
+}
+
+// A new struct to manage the 8086 flags by name.
+#[derive(Debug, Copy, Clone, PartialEq)]
+struct Flags {
+    parity: bool,
+    zero: bool,
+    sign: bool,
+    carry: bool,
+    auxiliary_carry: bool,
+}
+
+impl Flags {
+    // A helper method to get the flag state as a compact string
+    fn to_string(&self) -> String {
+        let mut s = String::new();
+        if self.parity {
+            s.push('P');
+        }
+        if self.zero {
+            s.push('Z');
+        }
+        if self.sign {
+            s.push('S');
+        }
+        if self.carry {
+            s.push('C');
+        }
+        if self.auxiliary_carry {
+            s.push('A');
+        }
+        s
+    }
+
+    // Prints the currently active flags
+    fn print_active(&self) {
+        if self.parity {
+            print!("P");
+        }
+        if self.zero {
+            print!("Z");
+        }
+        if self.sign {
+            print!("S");
+        }
+        if self.carry {
+            print!("C");
+        }
+        if self.auxiliary_carry {
+            print!("A");
+        }
+    }
+}
+
+struct Executor<'a> {
+    bytes: &'a [u8],
+    register_rows: [RegisterRow; 8],
+    flags: Flags,
+    ip: usize,
+    decoder: Decoder<'a>,
+}
+
+impl<'a> Executor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            register_rows: [RegisterRow { low: 0, high: 0 }; 8],
+            flags: Flags {
+                parity: false,
+                zero: false,
+                sign: false,
+                carry: false,
+                auxiliary_carry: false,
+            },
+            ip: 0,
+            decoder: Decoder::new(bytes),
+        }
+    }
+
+    fn is_eof(&self) -> bool {
+        self.ip >= self.bytes.len()
+    }
+
+    fn get_register_row(&mut self, reg: Register) -> &mut RegisterRow {
+        let idx = reg.get_index().1 as usize;
+        self.register_rows
+            .get_mut(idx)
+            .expect("Fatal error: Attempted to get register row with invalid index.")
+    }
+
+    fn get_16bit_register_value(&self, reg: Register) -> u16 {
+        let idx = reg.get_index().1 as usize;
+        let row = &self.register_rows[idx];
+        (row.high as u16) << 8 | (row.low as u16)
+    }
+
+    fn get_8bit_register_value(&self, reg: Register) -> u8 {
+        let (w, i) = reg.get_index();
+        if w == 1 {
+            panic!(
+                "Fatal error: Attempted to get 8-bit value from a 16-bit register: {}",
+                reg
+            );
+        }
+        let idx = i & 0b11;
+        let row = &self.register_rows[idx as usize];
+        if (i >> 2) != 0 {
+            row.high
+        } else {
+            row.low
+        }
+    }
+
+    fn get_register_display_value(&self, reg: Register) -> u16 {
+        let (w, i) = reg.get_index();
+        if w == 1 {
+            self.get_16bit_register_value(reg)
+        } else {
+            self.get_8bit_register_value(reg) as u16
+        }
+    }
+
+    fn execute_next_instruction(&mut self) {
+        // Capture initial state for logging
+        let start_ip = self.ip;
+        let start_flags = self.flags;
+
+        // Decode the instruction from the current position
+        self.decoder.pos = self.ip;
+        let instruction = self.decoder.decode_next_instruction();
+        let instruction_len = self.decoder.pos - self.ip;
+        self.ip = self.decoder.pos;
+
+        // Capture initial state of operands for logging
+        let initial_state = self.get_operand_values_for_log(&instruction);
+
+        // Execute the instruction
+        self.execute_instruction(&instruction);
+
+        // Capture final state for logging
+        let final_state = self.get_operand_values_for_log(&instruction);
+        let end_ip = self.ip;
+        let end_flags = self.flags;
+
+        // Print the log line
+        self.log_instruction_execution(
+            instruction,
+            start_ip,
+            end_ip,
+            initial_state,
+            final_state,
+            start_flags,
+            end_flags,
+        );
+    }
+
+    // A new function to handle all the logging logic
+    fn log_instruction_execution(
+        &self,
+        instruction: Instruction,
+        start_ip: usize,
+        end_ip: usize,
+        initial_state: Vec<(Operand, u16)>,
+        final_state: Vec<(Operand, u16)>,
+        start_flags: Flags,
+        end_flags: Flags,
+    ) {
+        let mut log_line = format!("{}", instruction);
+        let mut state_changes = Vec::new();
+
+        // Log operand value changes
+        for i in 0..initial_state.len() {
+            let (op, initial_val) = &initial_state[i];
+            let (_, final_val) = &final_state[i];
+            if initial_val != final_val {
+                if let Operand::R(reg) = op {
+                    state_changes.push(format!("{}:0x{:x}->0x{:x}", reg, initial_val, final_val));
+                }
+            }
+        }
+
+        // Log IP change
+        if start_ip != end_ip {
+            state_changes.push(format!("ip:0x{:x}->0x{:x}", start_ip, end_ip));
+        }
+
+        // Log flag changes
+        if start_flags != end_flags {
+            let start_flags_str = start_flags.to_string();
+            let end_flags_str = end_flags.to_string();
+            state_changes.push(format!("flags:{}->{}", start_flags_str, end_flags_str));
+        }
+
+        if !state_changes.is_empty() {
+            log_line.push_str(&format!(" ; {}", state_changes.join(" ")));
+        }
+
+        println!("{}", log_line);
+    }
+
+    // Helper function to get the values of operands for logging
+    fn get_operand_values_for_log(&self, instruction: &Instruction) -> Vec<(Operand, u16)> {
+        let mut values = Vec::new();
+        match instruction {
+            Instruction::BO(_, dest, src) => {
+                if let Operand::R(reg) = dest {
+                    values.push((*dest, self.get_register_display_value(*reg)));
+                }
+            }
+            _ => (),
+        }
+        values
+    }
+
+    fn execute_instruction(&mut self, instruction: &Instruction) {
+        match instruction {
+            Instruction::BO(op, arg1, arg2) => self.execute_binary_instruction(*op, *arg1, *arg2),
+            Instruction::JMP(op, arg) => self.execute_jump_instruction(*op, *arg),
+            _ => panic!("Unsupported instruction type: {:?}", instruction),
+        }
+    }
+
+    /// Executes a conditional jump instruction.
+    /// The displacement is an `i8` which can be positive or negative.
+    /// It's relative to the END of the jump instruction, so we add it to `self.ip`.
+    fn execute_jump_instruction(&mut self, op: JumpCondition, arg: i8) {
+        let should_jump = match op {
+            // JZ/JNZ check the Zero Flag, not the Sign Flag.
+            JumpCondition::JZ => self.flags.zero,
+            JumpCondition::JNZ => !self.flags.zero,
+            _ => panic!("no other jump conditions supported yet"),
+        };
+        // The jump displacement is relative to the start of the next instruction.
+        // Since self.ip is already at the start of the next instruction, we can
+        // just add the displacement. We cast to isize to handle negative jumps correctly.
+        if should_jump {
+            self.ip = (self.ip as isize + arg as isize) as usize;
+        }
+    }
+
+    fn execute_binary_instruction(&mut self, op: BinaryOp, arg1: Operand, arg2: Operand) {
+        match op {
+            BinaryOp::MOV => self.execute_mov_instruction(arg1, arg2),
+            BinaryOp::ADD | BinaryOp::SUB | BinaryOp::CMP => {
+                self.execute_arithmetic_instruction(op, arg1, arg2)
+            }
+            _ => panic!("Unsupported binary operation: {:?}", op),
+        }
+    }
+
+    fn execute_mov_instruction(&mut self, arg1: Operand, arg2: Operand) {
+        self.set_value(arg1, arg2);
+    }
+
+    fn execute_arithmetic_instruction(&mut self, op: BinaryOp, arg1: Operand, arg2: Operand) {
+        let val1 = self.get_operand_value(arg1);
+        let val2 = self.get_operand_value(arg2);
+
+        // We'll perform the arithmetic and then update the flags.
+        let (result, _carry_out) = match op {
+            BinaryOp::ADD => {
+                let (res, overflow) = (val1 as i16).overflowing_add(val2 as i16);
+                let carry_flag = overflow;
+                (res, carry_flag)
+            }
+            BinaryOp::SUB | BinaryOp::CMP => {
+                let (res, overflow) = (val1 as i16).overflowing_sub(val2 as i16);
+                let carry_flag = overflow;
+                (res, carry_flag)
+            }
+            _ => unreachable!("This should have been caught by the outer match statement."),
+        };
+
+        // Update all flags based on the result.
+        self.update_sign_flag(result);
+        self.update_zero_flag(result);
+        self.update_carry_flag(val1 as u16, val2 as u16, op);
+        self.update_auxiliary_carry_flag(val1 as u16, val2 as u16, op);
+        self.update_parity_flag(result);
+
+        if op == BinaryOp::ADD || op == BinaryOp::SUB {
+            self.set_value(arg1, Operand::IMM16(result as u16));
+        }
+    }
+
+    // Correct parity check: checks the number of set bits in the lower 8 bits.
+    fn update_parity_flag(&mut self, val: i16) {
+        let low_byte = (val as u8).count_ones();
+        self.flags.parity = low_byte % 2 == 0;
+    }
+
+    fn update_zero_flag(&mut self, val: i16) {
+        self.flags.zero = val == 0;
+    }
+
+    fn update_sign_flag(&mut self, val: i16) {
+        self.flags.sign = val < 0;
+    }
+
+    // Update the Carry flag based on the operation.
+    fn update_carry_flag(&mut self, val1: u16, val2: u16, op: BinaryOp) {
+        match op {
+            BinaryOp::ADD => {
+                let (_res, overflow) = val1.overflowing_add(val2);
+                self.flags.carry = overflow;
+            }
+            BinaryOp::SUB | BinaryOp::CMP => {
+                let (_res, underflow) = val1.overflowing_sub(val2);
+                self.flags.carry = underflow;
+            }
+            _ => (),
+        }
+    }
+
+    // Update the Auxiliary Carry flag based on the lower nibble of the operation.
+    fn update_auxiliary_carry_flag(&mut self, val1: u16, val2: u16, op: BinaryOp) {
+        match op {
+            BinaryOp::ADD => {
+                let res = (val1 & 0xF) + (val2 & 0xF);
+                self.flags.auxiliary_carry = res > 0xF;
+            }
+            BinaryOp::SUB | BinaryOp::CMP => {
+                let res = (val1 & 0xF) as i16 - (val2 & 0xF) as i16;
+                self.flags.auxiliary_carry = res < 0;
+            }
+            _ => (),
+        }
+    }
+
+    fn get_operand_value(&self, arg: Operand) -> u16 {
+        match arg {
+            Operand::IMM8(val) => val as u16,
+            Operand::IMM16(val) => val,
+            Operand::R(reg) => {
+                let (w, i) = reg.get_index();
+                if w == 1 {
+                    let row = self
+                        .register_rows
+                        .get(i as usize)
+                        .expect("Fatal error: Invalid register index for 16-bit register access.");
+                    (row.low as u16) | ((row.high as u16) << 8)
+                } else {
+                    let high = (i >> 2) != 0;
+                    let idx = i & 0b11;
+                    let row = self
+                        .register_rows
+                        .get(idx as usize)
+                        .expect("Fatal error: Invalid register index for 8-bit register access.");
+                    if high {
+                        row.high as u16
+                    } else {
+                        row.low as u16
+                    }
+                }
+            }
+            _ => panic!("Fatal error: Memory addressing mode not yet supported."),
+        }
+    }
+
+    fn set_value(&mut self, arg1: Operand, arg2: Operand) {
+        let val = self.get_operand_value(arg2);
+        if let Operand::R(reg) = arg1 {
+            let row = self.get_register_row(reg);
+            let (w, i) = reg.get_index();
+            let low = val as u8;
+            let high = (val >> 8) as u8;
+            if w == 1 {
+                row.low = low;
+                row.high = high;
+            } else if i < 4 {
+                row.low = low;
+            } else {
+                row.high = low;
+            }
+        }
+    }
+}
 
 // --- Main public API ---
 
@@ -63,6 +484,31 @@ pub enum Register {
     SI,
     #[strum(serialize = "di")]
     DI,
+}
+
+impl Register {
+    /// Returns the (w_bit, reg_index) for the register.
+    /// This corresponds to its position in the `REGISTERS` lookup table.
+    pub fn get_index(&self) -> (u8, u8) {
+        match self {
+            Self::AL => (0, 0),
+            Self::CL => (0, 1),
+            Self::DL => (0, 2),
+            Self::BL => (0, 3),
+            Self::AH => (0, 4),
+            Self::CH => (0, 5),
+            Self::DH => (0, 6),
+            Self::BH => (0, 7),
+            Self::AX => (1, 0),
+            Self::CX => (1, 1),
+            Self::DX => (1, 2),
+            Self::BX => (1, 3),
+            Self::SP => (1, 4),
+            Self::BP => (1, 5),
+            Self::SI => (1, 6),
+            Self::DI => (1, 7),
+        }
+    }
 }
 
 /// A lookup table for all general-purpose registers, indexed by the W-bit
@@ -265,13 +711,13 @@ impl BinaryOp {
             0b000 => BinaryOp::ADD,
             0b101 => BinaryOp::SUB,
             0b111 => BinaryOp::CMP,
-            _ => unreachable!(),
+            _ => unreachable!("Invalid arithmetic op encoding: {:b}", op),
         }
     }
 }
 
 /// Represents a decoded 8086 instruction.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum Instruction {
     BO(BinaryOp, Operand, Operand),
     JMP(JumpCondition, i8),
@@ -316,7 +762,7 @@ impl<'a> Decoder<'a> {
     /// Reads a single byte and advances the position. Panics if out of bounds.
     fn read_u8(&mut self) -> u8 {
         if self.pos >= self.bytes.len() {
-            panic!("Unexpected end of byte stream trying to read a byte");
+            panic!("Fatal error: Unexpected end of byte stream while trying to read a byte at position {}", self.pos);
         }
         let byte = self.bytes[self.pos];
         self.pos += 1;
@@ -353,25 +799,11 @@ impl<'a> Decoder<'a> {
             0x70..=0x7F => self.decode_jump(opcode),
             // LOOP and JCXZ instructions
             0xE0..=0xE3 => self.decode_loop(opcode),
-            _ => panic!("Unsupported opcode: {:#04x}", opcode),
+            _ => panic!(
+                "Fatal error: Unsupported opcode {:#04x} at position {}",
+                opcode, start_pos
+            ),
         };
-
-        // --- Printing for debugging purposes ---
-        #[cfg(debug_assertions)]
-        {
-            println!(
-                "Starting position: {}\nProcessed: {} bytes\nBytes: {}\n{}\n",
-                start_pos,
-                self.pos - start_pos,
-                self.bytes[start_pos..self.pos]
-                    .iter()
-                    .map(|n| format!("{:08b}", n))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                instr
-            );
-        }
-        // ---------------------------------------
 
         instr
     }
@@ -380,22 +812,20 @@ impl<'a> Decoder<'a> {
 
     /// Decodes a LOOP, LOOPZ, LOOPNZ, or JCXZ instruction.
     fn decode_loop(&mut self, opcode: u8) -> Instruction {
-        // Look up the LoopCondition from the LOOP_CONDITIONS array
         let cond_index = (opcode - 0xE0) as usize;
         let cond = *LOOP_CONDITIONS
             .get(cond_index)
-            .expect("Invalid loop condition opcode");
+            .expect("Fatal error: Invalid loop condition opcode during decoding.");
         let disp = self.read_u8() as i8;
         Instruction::LOOP(cond, disp)
     }
 
     /// Decodes a conditional jump instruction.
     fn decode_jump(&mut self, opcode: u8) -> Instruction {
-        // Look up the JumpCondition from the JUMP_CONDITIONS array
         let cond_index = (opcode & 0x0F) as usize;
         let cond = *JUMP_CONDITIONS
             .get(cond_index)
-            .expect("Invalid jump condition opcode");
+            .expect("Fatal error: Invalid jump condition opcode during decoding.");
         let disp = self.read_u8() as i8;
         Instruction::JMP(cond, disp)
     }
@@ -418,7 +848,8 @@ impl<'a> Decoder<'a> {
     fn decode_arithmetic_imm_to_rm(&mut self, opcode: u8) -> Instruction {
         let w = (opcode & 0b1) != 0;
         let mod_rm_byte = self.read_u8();
-        let op = BinaryOp::arithmetic_op_from_encoding((mod_rm_byte >> 3) & 0b111);
+        let op_code = (mod_rm_byte >> 3) & 0b111;
+        let op = BinaryOp::arithmetic_op_from_encoding(op_code);
         let dest = self.decode_rm_operand(mod_rm_byte, w);
         let src = if w {
             if opcode == 0x83 {
@@ -435,12 +866,16 @@ impl<'a> Decoder<'a> {
     fn decode_arithmetic_imm_to_acc(&mut self, opcode: u8) -> Instruction {
         let op = BinaryOp::arithmetic_op_from_encoding((opcode >> 3) & 0b111);
         let w = (opcode & 0b1) != 0;
-        // The accumulator registers (AL, AX) are always at index 0
         let dest_reg = REGISTERS
             .get(w as usize)
-            .expect("Invalid W bit for accumulator register")
+            .unwrap_or_else(|| {
+                panic!(
+                    "Fatal error: Invalid W bit ({}) for accumulator register during decoding.",
+                    w
+                )
+            })
             .first()
-            .expect("Missing accumulator register");
+            .expect("Fatal error: Missing accumulator register in lookup table.");
         let dest = Operand::R(*dest_reg);
         let src = if w {
             Operand::IMM16(self.read_u16_le())
@@ -455,9 +890,19 @@ impl<'a> Decoder<'a> {
         let reg_encoding = (opcode & 0b111) as usize;
         let dest_reg = REGISTERS
             .get(w as usize)
-            .expect("Invalid W bit")
+            .unwrap_or_else(|| {
+                panic!(
+                    "Fatal error: Invalid W bit ({}) for MOV immediate to register.",
+                    w
+                )
+            })
             .get(reg_encoding)
-            .expect("Invalid REG encoding");
+            .unwrap_or_else(|| {
+                panic!(
+                    "Fatal error: Invalid REG encoding ({}) for MOV immediate to register.",
+                    reg_encoding
+                )
+            });
         let dest = Operand::R(*dest_reg);
         let src = if w {
             Operand::IMM16(self.read_u16_le())
@@ -484,9 +929,14 @@ impl<'a> Decoder<'a> {
         let w = (opcode & 0b1) != 0;
         let acc_reg = REGISTERS
             .get(w as usize)
-            .expect("Invalid W bit for accumulator register")
+            .unwrap_or_else(|| {
+                panic!(
+                    "Fatal error: Invalid W bit ({}) for MOV memory to accumulator.",
+                    w
+                )
+            })
             .first()
-            .expect("Missing accumulator register");
+            .expect("Fatal error: Missing accumulator register in lookup table.");
         let acc_op = Operand::R(*acc_reg);
         let mem_op = Operand::MA(MemoryAddress::DA(self.read_u16_le()));
         let (dest, src) = if d {
@@ -505,9 +955,16 @@ impl<'a> Decoder<'a> {
         let reg_op = Operand::R(
             *REGISTERS
                 .get(w as usize)
-                .expect("Invalid W bit")
+                .unwrap_or_else(|| {
+                    panic!("Fatal error: Invalid W bit ({}) during ModR/M decoding.", w)
+                })
                 .get(reg_encoding as usize)
-                .expect("Invalid REG encoding"),
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Fatal error: Invalid REG encoding ({}) during ModR/M decoding.",
+                        reg_encoding
+                    )
+                }),
         );
         let rm_op = self.decode_rm_operand(mod_rm_byte, w);
 
@@ -525,9 +982,16 @@ impl<'a> Decoder<'a> {
         if md == 0b11 {
             let reg = REGISTERS
                 .get(w as usize)
-                .expect("Invalid W bit")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Fatal error: Invalid W bit ({}) for R/M register decoding.",
+                        w
+                    )
+                })
                 .get(rm)
-                .expect("Invalid R/M encoding for register");
+                .unwrap_or_else(|| {
+                    panic!("Fatal error: Invalid R/M encoding ({}) for register.", rm)
+                });
             return Operand::R(*reg);
         }
         let addr = match md {
@@ -540,7 +1004,7 @@ impl<'a> Decoder<'a> {
             }
             0b01 => Self::decode_effective_address_disp8(rm as u8, self.read_u8()),
             0b10 => Self::decode_effective_address_disp16(rm as u8, self.read_u16_le()),
-            _ => unreachable!(),
+            _ => unreachable!("Invalid MOD field during ModR/M decoding: {:b}", md),
         };
         Operand::MA(addr)
     }
@@ -556,7 +1020,10 @@ impl<'a> Decoder<'a> {
             0b100 => MemoryAddress::R(REGISTERS[1][6]),
             0b101 => MemoryAddress::R(REGISTERS[1][7]),
             0b111 => MemoryAddress::R(REGISTERS[1][3]),
-            _ => panic!("Invalid R/M encoding for MOD=00: {}", rm),
+            _ => panic!(
+                "Fatal error: Invalid R/M encoding for MOD=00 with no displacement: {}",
+                rm
+            ),
         }
     }
 
@@ -570,7 +1037,7 @@ impl<'a> Decoder<'a> {
             0b101 => MemoryAddress::RD8(REGISTERS[1][7], disp),
             0b110 => MemoryAddress::RD8(REGISTERS[1][5], disp),
             0b111 => MemoryAddress::RD8(REGISTERS[1][3], disp),
-            _ => unreachable!(),
+            _ => unreachable!("Invalid R/M encoding for MOD=01 with 8-bit displacement."),
         }
     }
 
@@ -584,7 +1051,7 @@ impl<'a> Decoder<'a> {
             0b101 => MemoryAddress::RD16(REGISTERS[1][7], disp),
             0b110 => MemoryAddress::RD16(REGISTERS[1][5], disp),
             0b111 => MemoryAddress::RRD16(REGISTERS[1][3], REGISTERS[1][7], disp),
-            _ => unreachable!(),
+            _ => unreachable!("Invalid R/M encoding for MOD=10 with 16-bit displacement."),
         }
     }
 }
@@ -622,6 +1089,7 @@ fn main() {
     println!("Starting 8086 decoder...\n");
     match read_file(input_file) {
         Ok(buffer) => {
+            execute(&buffer);
             let decoded_instructions = decode(&buffer);
             match write_decoding(&decoded_instructions, output_file) {
                 Ok(_) => println!("Decoding complete! Output written to '{}'.", output_file),
@@ -631,3 +1099,4 @@ fn main() {
         Err(e) => eprintln!("Error reading input file: {}", e),
     }
 }
+
