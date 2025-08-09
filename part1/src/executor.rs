@@ -192,7 +192,7 @@ impl<'a> Executor<'a> {
     }
 
     fn get_register_row(&mut self, reg: Register) -> &mut RegisterRow {
-        let (_w, i) = reg.get_index();
+        let (_, i) = reg.get_index();
         let idx = i as usize;
         self.register_rows
             .get_mut(idx)
@@ -200,7 +200,7 @@ impl<'a> Executor<'a> {
     }
 
     fn get_16bit_register_value(&self, reg: Register) -> u16 {
-        let (_w, i) = reg.get_index();
+        let (_, i) = reg.get_index();
         let idx = i as usize;
         let row = self
             .register_rows
