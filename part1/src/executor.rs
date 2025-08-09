@@ -26,7 +26,7 @@ struct Flags {
 pub struct Executor {
     /// The 1MB memory space of the 8086. Program code is loaded here. We use a Box to avoid the
     /// program crashing due to a stack overflow.
-    memory: Box<[u8; 1024 * 1024]>,
+    pub memory: Box<[u8; 1024 * 1024]>,
     /// The 8 general-purpose 16-bit registers, modeled as pairs of 8-bit values.
     register_rows: [RegisterRow; 8],
     /// The CPU flags.
@@ -60,7 +60,7 @@ impl Executor {
 
     /// Runs the simulation loop, decoding and executing instructions one by one
     /// until the end of the program is reached.
-    pub fn run(&mut self) {
+    pub fn run(mut self) -> Box<[u8; 1024 * 1024]> {
         println!("\nStart of execution log:");
         println!("--------------------------");
 
@@ -98,6 +98,8 @@ impl Executor {
         }
         println!("--------------------------");
         self.log_final_state();
+
+        self.memory
     }
 
     // --- Execution Logic ---
