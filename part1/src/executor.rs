@@ -350,8 +350,8 @@ impl<'a> Executor<'a> {
 
         self.flags.carry = carry_flag_val;
         self.flags.auxiliary_carry = auxiliary_carry_flag_val;
-        self.update_sign_flag(result);
-        self.update_zero_flag(result);
+        self.flags.zero = result == 0;
+        self.flags.sign = result < 0;
         self.update_parity_flag(result);
 
         if op == BinaryOp::Add || op == BinaryOp::Sub {
@@ -362,14 +362,6 @@ impl<'a> Executor<'a> {
     fn update_parity_flag(&mut self, val: i16) {
         let low_byte = (val as u8).count_ones();
         self.flags.parity = low_byte % 2 == 0;
-    }
-
-    fn update_zero_flag(&mut self, val: i16) {
-        self.flags.zero = val == 0;
-    }
-
-    fn update_sign_flag(&mut self, val: i16) {
-        self.flags.sign = val < 0;
     }
 
     // Retrieves the value from an operand, respecting the specified width (0 for 8-bit, 1 for 16-bit).
