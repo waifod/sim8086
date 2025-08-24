@@ -64,6 +64,7 @@ impl Executor {
         println!("\nStart of execution log:");
         println!("--------------------------");
 
+        let mut clocks: u32 = 0;
         while self.ip < self.end {
             let start_ip = self.ip;
             let start_flags = self.flags;
@@ -88,6 +89,7 @@ impl Executor {
 
             self.log_instruction_execution(
                 &instruction,
+                &mut clocks,
                 start_ip,
                 end_ip,
                 initial_state,
@@ -332,11 +334,7 @@ impl Executor {
     fn get_8bit_register_value(&self, reg: Register) -> u8 {
         let (_, i) = reg.get_index();
         let row = self.register_rows[(i & 0b11) as usize];
-        if (i >> 2) != 0 {
-            row.high
-        } else {
-            row.low
-        }
+        if (i >> 2) != 0 { row.high } else { row.low }
     }
 
     fn set_8bit_register_low_value(&mut self, reg: Register, val: u8) {
@@ -365,6 +363,7 @@ impl Executor {
     fn log_instruction_execution(
         &self,
         instruction: &Instruction,
+        clocks: &mut u32,
         start_ip: usize,
         end_ip: usize,
         initial_state: Vec<(Operand, u16)>,
@@ -372,7 +371,18 @@ impl Executor {
         start_flags: Flags,
         end_flags: Flags,
     ) {
-        let mut log_line = format!("{: <20}", instruction.to_string());
+        let (opc, eac) = instruction.to_clocks();
+        *clocks += opc + eac;
+        let clocks_str = if eac == 0 {
+            format!("{} = {}", opc, clocks)
+        } else {
+            format!("{} = {} ({} + {} eac)", opc + eac, clocks, opc, eac)
+        };
+        let mut log_line = format!(
+            "{: <25} ; Clocks +{: <25} ",
+            instruction.to_string(),
+            clocks_str
+        );
         let mut state_changes = Vec::new();
 
         for (op, initial_val) in &initial_state {

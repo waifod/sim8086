@@ -140,6 +140,69 @@ impl fmt::Display for MemoryAddress {
     }
 }
 
+impl MemoryAddress {
+    /// Calculates the Effective Address (EA) clock cycles for the given memory addressing mode.
+    /// Based on Intel 8086 User's Manual, Table 2-10.
+    pub fn calculate_ea_clocks(&self) -> u32 {
+        match self {
+            MemoryAddress::R(reg) => {
+                // [BX], [BP], [SI], [DI]
+                match reg {
+                    Register::Bx | Register::Bp | Register::Si | Register::Di => 5,
+                    _ => {
+                        // This case should ideally not be reachable if MemoryAddress::R is only used for valid base/index registers.
+                        // For robustness, return 0.
+                        panic!(
+                            "Warning: Invalid register {:?} used in MemoryAddress::R for EA calculation.",
+                            reg,
+                        );
+                    }
+                }
+            }
+            MemoryAddress::Rr(r1, r2) => {
+                // [BX + SI], [BP + DI], [BX + DI], [BP + SI]
+                match (r1, r2) {
+                    (Register::Bx, Register::Si) | (Register::Bp, Register::Di) => 7,
+                    (Register::Bx, Register::Di) | (Register::Bp, Register::Si) => 8,
+                    _ => {
+                        eprintln!(
+                            "Warning: Invalid register combination {:?}, {:?} used in MemoryAddress::Rr for EA calculation.",
+                            r1, r2
+                        );
+                        0
+                    }
+                }
+            }
+            MemoryAddress::Da(_) => 6, // [disp16]
+            MemoryAddress::Rd8(reg, _) | MemoryAddress::Rd16(reg, _) => {
+                // [BX + disp8/16], [BP + disp8/16], [SI + disp8/16], [DI + disp8/16]
+                match reg {
+                    Register::Bx | Register::Bp | Register::Si | Register::Di => 9,
+                    _ => {
+                        panic!(
+                            "Warning: Invalid register {:?} used in MemoryAddress::Rd8/Rd16 for EA calculation.",
+                            reg,
+                        );
+                    }
+                }
+            }
+            MemoryAddress::Rrd8(r1, r2, _) | MemoryAddress::Rrd16(r1, r2, _) => {
+                // [BX + SI + disp8/16], [BP + DI + disp8/16], [BX + DI + disp8/16], [BP + SI + disp8/16]
+                match (r1, r2) {
+                    (Register::Bx, Register::Si) | (Register::Bp, Register::Di) => 11,
+                    (Register::Bx, Register::Di) | (Register::Bp, Register::Si) => 12,
+                    _ => {
+                        panic!(
+                            "Warning: Invalid register combination {:?}, {:?} used in MemoryAddress::Rrd8/Rrd16 for EA calculation.",
+                            r1, r2,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum Operand {
     R(Register),
@@ -279,3 +342,116 @@ impl fmt::Display for Instruction {
     }
 }
 
+impl Instruction {
+    /// Returns a tuple (opcode_clocks, effective_address_clocks) for the instruction.
+    /// Clock cycles are based on the Intel 8086 User's Manual.
+    /// Only supports MOV, ADD, SUB instructions.
+    pub fn to_clocks(self) -> (u32, u32) {
+        match self {
+            Instruction::Bo(op, dest, src) => {
+                let opcode_clocks;
+                let mut ea_clocks = 0;
+
+                match op {
+                    BinaryOp::Mov => {
+                        match (dest, src) {
+                            (Operand::R(_), Operand::R(_)) => {
+                                // MOV R, R
+                                opcode_clocks = 2;
+                            }
+                            (Operand::R(d_reg), Operand::Ma(s_mem)) => {
+                                // MOV R, M
+                                // Special case: MOV AL/AX, [disp16] (direct address)
+                                if (d_reg == Register::Al || d_reg == Register::Ax)
+                                    && matches!(s_mem, MemoryAddress::Da(_))
+                                {
+                                    opcode_clocks = 10;
+                                } else {
+                                    opcode_clocks = 8;
+                                    ea_clocks = s_mem.calculate_ea_clocks();
+                                }
+                            }
+                            (Operand::Ma(d_mem), Operand::R(s_reg)) => {
+                                // MOV M, R
+                                // Special case: MOV [disp16], AL/AX (direct address)
+                                if (s_reg == Register::Al || s_reg == Register::Ax)
+                                    && matches!(d_mem, MemoryAddress::Da(_))
+                                {
+                                    opcode_clocks = 10;
+                                } else {
+                                    opcode_clocks = 9;
+                                    ea_clocks = d_mem.calculate_ea_clocks();
+                                }
+                            }
+                            (Operand::R(_d_reg), Operand::Imm8(_))
+                            | (Operand::R(_d_reg), Operand::Imm16(_)) => {
+                                // MOV R, I
+                                opcode_clocks = 4;
+                            }
+                            (Operand::Ma(d_mem), Operand::Imm8(_))
+                            | (Operand::Ma(d_mem), Operand::Imm16(_)) => {
+                                // MOV M, I
+                                opcode_clocks = 10;
+                                ea_clocks = d_mem.calculate_ea_clocks();
+                            }
+                            _ => {
+                                eprintln!(
+                                    "Warning: Unhandled MOV instruction operand combination: dest={:?}, src={:?}",
+                                    dest, src
+                                );
+                                // Default to 0,0 for unhandled combinations
+                                return (0, 0);
+                            }
+                        }
+                    }
+                    BinaryOp::Add | BinaryOp::Sub => {
+                        match (dest, src) {
+                            (Operand::R(_), Operand::R(_)) => {
+                                // ADD/SUB R, R
+                                opcode_clocks = 3;
+                            }
+                            (Operand::R(_), Operand::Ma(s_mem)) => {
+                                // ADD/SUB R, M
+                                opcode_clocks = 9;
+                                ea_clocks = s_mem.calculate_ea_clocks();
+                            }
+                            (Operand::Ma(d_mem), Operand::R(_)) => {
+                                // ADD/SUB M, R
+                                opcode_clocks = 16;
+                                ea_clocks = d_mem.calculate_ea_clocks();
+                            }
+                            (Operand::R(_), Operand::Imm8(_))
+                            | (Operand::R(_), Operand::Imm16(_)) => {
+                                // ADD/SUB R, I
+                                // The manual lists 4 clocks for both accumulator and general register immediate.
+                                opcode_clocks = 4;
+                            }
+                            (Operand::Ma(d_mem), Operand::Imm8(_))
+                            | (Operand::Ma(d_mem), Operand::Imm16(_)) => {
+                                // ADD/SUB M, I
+                                opcode_clocks = 17;
+                                ea_clocks = d_mem.calculate_ea_clocks();
+                            }
+                            _ => {
+                                eprintln!(
+                                    "Warning: Unhandled ADD/SUB instruction operand combination: dest={:?}, src={:?}",
+                                    dest, src
+                                );
+                                return (0, 0);
+                            }
+                        }
+                    }
+                    BinaryOp::Cmp => {
+                        eprintln!("Warning: CMP instruction clock cycles not implemented.");
+                        return (0, 0);
+                    }
+                }
+                (opcode_clocks, ea_clocks)
+            }
+            Instruction::Jmp(_, _) | Instruction::Loop(_, _) => {
+                eprintln!("Warning: JMP/LOOP instruction clock cycles not implemented.");
+                (0, 0)
+            }
+        }
+    }
+}
