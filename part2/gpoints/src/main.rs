@@ -2,6 +2,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::fs;
 use std::io;
+use haversine::reference_haversine;
 
 #[derive(Debug, Clone, Copy)]
 struct Point {
@@ -131,7 +132,7 @@ fn compute_haversine_sum(pairs: &[(Point, Point)]) -> f64 {
     let earth_radius = 6372.8;
     pairs
         .iter()
-        .map(|(p0, p1)| reference_haversine(p0.x, p0.y, p1.x, p1.y, earth_radius))
+        .map(|(p0, p1)| reference_haversine([p0.x, p0.y], [p1.x, p1.y], earth_radius))
         .sum()
 }
 
@@ -144,37 +145,6 @@ fn write_report(seed: u64, count: usize, sum: f64, filename: &str) -> Result<(),
     
     fs::write(filename, report)?;
     Ok(())
-}
-
-/// Calculate the Haversine distance between two points on a sphere
-///
-/// # Arguments
-/// * `x0` - Longitude of first point in radians
-/// * `y0` - Latitude of first point in radians
-/// * `x1` - Longitude of second point in radians
-/// * `y1` - Latitude of second point in radians
-/// * `earth_radius` - Radius of the sphere (generally expected to be 6372.8 for Earth in km)
-///
-/// # Returns
-/// The great circle distance between the two points
-///
-/// # Note
-/// This is not meant to be a "good" way to calculate the Haversine distance.
-/// Instead, it attempts to follow, as closely as possible, the formula used in the real-world
-/// question on which these homework exercises are loosely based.
-fn reference_haversine(x0: f64, y0: f64, x1: f64, y1: f64, earth_radius: f64) -> f64 {
-    let lat1 = y0;
-    let lat2 = y1;
-    let lon1 = x0;
-    let lon2 = x1;
-
-    let d_lat = lat2 - lat1;
-    let d_lon = lon2 - lon1;
-
-    let a = (d_lat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (d_lon / 2.0).sin().powi(2);
-    let c = 2.0 * a.sqrt().asin();
-
-    earth_radius * c
 }
 
 #[cfg(test)]
@@ -197,7 +167,9 @@ mod tests {
         let london_lat = 51.5074_f64.to_radians();
         let earth_radius = 6372.8;
 
-        let distance = reference_haversine(ny_lon, ny_lat, london_lon, london_lat, earth_radius);
+        let ny = [ny_lon, ny_lat];
+        let london = [london_lon, london_lat];
+        let distance = reference_haversine(ny, london, earth_radius);
         
         // Expected distance is approximately 5570 km
         assert!(distance > 5500.0 && distance < 5600.0, "Distance was {}", distance);
@@ -206,7 +178,8 @@ mod tests {
     #[test]
     fn test_reference_haversine_same_point() {
         let earth_radius = 6372.8;
-        let distance = reference_haversine(0.0, 0.0, 0.0, 0.0, earth_radius);
+        let point = [0.0, 0.0];
+        let distance = reference_haversine(point, point, earth_radius);
         assert!((distance - 0.0).abs() < 1e-10);
     }
 
