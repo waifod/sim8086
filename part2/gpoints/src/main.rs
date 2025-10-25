@@ -79,13 +79,13 @@ fn generate_unit_points_pairs(n: usize, seed: u64) -> Vec<(Point, Point)> {
     
     for _ in 0..n {
         // Generate first point
-        let [x0, y0, z0] = sample_unit_sphere(&mut rng);
-        let (theta0, phi0) = normalized_cartesian_to_spherical(x0, y0, z0);
+        let cartesian0 = sample_unit_sphere(&mut rng);
+        let (theta0, phi0) = normalized_cartesian_to_spherical(cartesian0);
         let p0 = Point::new(theta0, phi0);
         
         // Generate second point
-        let [x1, y1, z1] = sample_unit_sphere(&mut rng);
-        let (theta1, phi1) = normalized_cartesian_to_spherical(x1, y1, z1);
+        let cartesian1 = sample_unit_sphere(&mut rng);
+        let (theta1, phi1) = normalized_cartesian_to_spherical(cartesian1);
         let p1 = Point::new(theta1, phi1);
         
         pairs.push((p0, p1));
@@ -95,7 +95,7 @@ fn generate_unit_points_pairs(n: usize, seed: u64) -> Vec<(Point, Point)> {
 }
 
 /// Sample a random point on the unit sphere using the normal distribution method
-fn sample_unit_sphere(rng: &mut impl Rng) -> [f64; 3] {
+fn sample_unit_sphere(rng: &mut impl Rng) -> (f64, f64, f64) {
     loop {
         // Sample from standard normal distribution
         let x: f64 = rng.gen_range(-1.0..1.0);
@@ -107,14 +107,14 @@ fn sample_unit_sphere(rng: &mut impl Rng) -> [f64; 3] {
         // Reject if too close to origin or outside unit sphere
         if length_squared > 0.0001 && length_squared < 1.0 {
             let length = length_squared.sqrt();
-            return [x / length, y / length, z / length];
+            return (x / length, y / length, z / length);
         }
     }
 }
 
 /// Convert normalized Cartesian coordinates to spherical coordinates
 /// Returns (theta, phi) where theta is longitude and phi is latitude in radians
-fn normalized_cartesian_to_spherical(x: f64, y: f64, z: f64) -> (f64, f64) {
+fn normalized_cartesian_to_spherical((x, y, z): (f64, f64, f64)) -> (f64, f64) {
     let rho = (x.powi(2) + y.powi(2) + z.powi(2)).sqrt();
     let theta = y.atan2(x);
     let phi = (z / rho).clamp(-1.0, 1.0).acos();
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn test_normalized_cartesian_to_spherical() {
         // Test conversion at (1, 0, 0) - should give theta=0, phi=π/2
-        let (theta, phi) = normalized_cartesian_to_spherical(1.0, 0.0, 0.0);
+        let (theta, phi) = normalized_cartesian_to_spherical((1.0, 0.0, 0.0));
         assert!((theta - 0.0).abs() < 1e-10);
         assert!((phi - std::f64::consts::PI / 2.0).abs() < 1e-10);
     }
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn test_sample_unit_sphere() {
         let mut rng = StdRng::seed_from_u64(42);
-        let [x, y, z] = sample_unit_sphere(&mut rng);
+        let (x, y, z) = sample_unit_sphere(&mut rng);
         
         // Check that the point is on the unit sphere
         let length = (x * x + y * y + z * z).sqrt();
