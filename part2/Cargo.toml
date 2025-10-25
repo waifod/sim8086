@@ -1,0 +1,3 @@
+[workspace]
+members = ["gpoints", "chaversinesum"]
+resolver = "3"
