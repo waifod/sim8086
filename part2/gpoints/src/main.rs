@@ -17,21 +17,35 @@ impl Point {
 }
 
 fn main() {
-    let mut input = String::new();
+    let args: Vec<String> = std::env::args().collect();
+    
+    let (seed, count) = if args.len() >= 3 {
+        // Read from command-line arguments
+        let seed: u64 = args[1]
+            .parse()
+            .expect("Please provide a valid seed as first argument!");
+        let count: usize = args[2]
+            .parse()
+            .expect("Please provide a valid pair count as second argument!");
+        (seed, count)
+    } else {
+        // Fall back to reading from stdin
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .expect("Failed to read line");
 
-    io::stdin()
-        .read_line(&mut input)
-        .expect("Failed to read line");
-
-    let mut parts = input.trim().split_whitespace();
-    let seed: u64 = parts
-        .next()
-        .and_then(|s| s.parse().ok())
-        .expect("Please type a valid seed!");
-    let count: usize = parts
-        .next()
-        .and_then(|s| s.parse().ok())
-        .expect("Please type a valid pair count!");
+        let mut parts = input.trim().split_whitespace();
+        let seed: u64 = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("Please type a valid seed!");
+        let count: usize = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("Please type a valid pair count!");
+        (seed, count)
+    };
 
     println!("Generating {} pairs with seed {}...", count, seed);
     
